@@ -1,0 +1,2 @@
+VERSION = '2.4'
+BUILD_NAME = f'Shiliao-{VERSION}'

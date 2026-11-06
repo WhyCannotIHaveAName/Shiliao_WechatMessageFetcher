@@ -1,0 +1,13 @@
+Shiliao / 拾聊 Windows chat exporter
+
+Contains modified portions and format references from:
+fanyuantaier/wechatauto-replica
+https://github.com/fanyuantaier/wechatauto-replica
+Commit bc2e6f2461330eb1a53996d2f2afc18416376b52
+Licensed under the Apache License, Version 2.0.
+
+Changes: isolated read-only Windows process/database routines, bounded memory
+reads, cancellation, no persistent keys, authenticated snapshots and committed
+WAL recovery; standalone desktop GUI, media decoding and offline exporters.
+
+Dependencies retain their respective licenses. See third-party-licenses.

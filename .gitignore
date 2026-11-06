@@ -1,0 +1,13 @@
+/.venv/
+/venv/
+/vendor/
+/build/
+/dist*/
+/outputs/
+__pycache__/
+packaged-test.json
+*.db*
+*.dat
+*.zip
+*.exe
+*.html

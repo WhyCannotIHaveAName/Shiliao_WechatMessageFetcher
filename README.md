@@ -1,6 +1,6 @@
 # 拾聊 2.4 Windows 版
 
-解压整个 `拾聊-2.4-Windows.zip`，然后打开 `Shiliao-2.4\Shiliao-2.4.exe`。在导出的 HTML 里点击「展开聊天记录」即可阅读合并转发中的消息。如果里面还有一份聊天记录，可以继续展开。TXT 用缩进表示层级，JSON 用 forwarded 数组保存各层消息。只有摘要或缺少本地图片时会保留相应说明。
+从 [GitHub Releases 下载 Shiliao-2.4-Windows.zip](https://github.com/WhyCannotIHaveAName/Shiliao_WechatMessageFetcher/releases/download/v2.4/Shiliao-2.4-Windows.zip)，解压整个压缩包，然后打开 `Shiliao-2.4\Shiliao-2.4.exe`。在导出的 HTML 里点击「展开聊天记录」即可阅读合并转发中的消息。如果里面还有一份聊天记录，可以继续展开。TXT 用缩进表示层级，JSON 用 forwarded 数组保存各层消息。只有摘要或缺少本地图片时会保留相应说明。
 
 2.2 版支持从本机微信缓存识别图片密钥，适用于迁移到其他盘的账号目录。已用真实迁移目录验证图片导出，详细范围见 `TESTING.md`。
 

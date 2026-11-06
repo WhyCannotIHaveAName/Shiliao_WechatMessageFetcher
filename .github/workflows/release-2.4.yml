@@ -5,6 +5,10 @@ on:
     branches: [main]
     paths: ['.github/workflows/release-2.4.yml']
 
+concurrency:
+  group: windows-release-2.4
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -21,13 +25,29 @@ jobs:
           python-version: '3.12'
       - run: python -m pip install -r requirements.txt
       - run: python fetch_tk_resources.py
+      - name: Match Tcl/Tk scripts to the runner's native libraries
+        shell: python
+        run: |
+          import pathlib, shutil, tkinter
+          root = tkinter.Tk()
+          for name, source in [('tcl8.6', root.tk.call('info', 'library')),
+                               ('tk8.6', root.tk.getvar('tk_library'))]:
+              destination = pathlib.Path('vendor') / name
+              shutil.copytree(str(source), destination, dirs_exist_ok=True)
+          root.destroy()
       - run: python test_export.py
       - run: python -m PyInstaller --noconfirm Shiliao.spec
       - name: Test executable and package it
         shell: pwsh
         run: |
           $report = Join-Path $PWD 'packaged-test.json'
-          $proc = Start-Process '.\dist\Shiliao-2.4\Shiliao-2.4.exe' -ArgumentList @('--self-test', ('"' + $report + '"')) -PassThru -Wait
+          $proc = Start-Process '.\dist\Shiliao-2.4\Shiliao-2.4.exe' -ArgumentList @('--self-test', ('"' + $report + '"')) -PassThru
+          if (!$proc.WaitForExit(90000)) {
+            $proc.Refresh()
+            Write-Error "Self-test timed out. Window: $($proc.MainWindowTitle)" -ErrorAction Continue
+            Stop-Process -Id $proc.Id
+            throw 'Self-test timed out'
+          }
           $result = Get-Content -Raw $report | ConvertFrom-Json
           if ($proc.ExitCode -ne 0 -or !$result.passed -or $result.tests -lt 10) { throw 'Packaged tests failed' }
           python package_release.py

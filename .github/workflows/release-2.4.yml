@@ -1,0 +1,55 @@
+name: Publish Windows 2.4
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/release-2.4.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.txt
+      - run: python fetch_tk_resources.py
+      - run: python test_export.py
+      - run: python -m PyInstaller --noconfirm Shiliao.spec
+      - name: Test executable and package it
+        shell: pwsh
+        run: |
+          $report = Join-Path $PWD 'packaged-test.json'
+          $proc = Start-Process '.\dist\Shiliao-2.4\Shiliao-2.4.exe' -ArgumentList @('--self-test', ('"' + $report + '"')) -PassThru -Wait
+          $result = Get-Content -Raw $report | ConvertFrom-Json
+          if ($proc.ExitCode -ne 0 -or !$result.passed -or $result.tests -lt 10) { throw 'Packaged tests failed' }
+          python package_release.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item -LiteralPath 'outputs/拾聊-2.4-Windows.zip' -Destination 'Shiliao-2.4-Windows.zip'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-2.4
+          path: Shiliao-2.4-Windows.zip
+          if-no-files-found: error
+
+  publish:
+    needs: windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-2.4
+      - name: Publish tested Windows archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create v2.4 Shiliao-2.4-Windows.zip --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "拾聊 2.4 · Windows" --notes "解压 Shiliao-2.4-Windows.zip，运行 Shiliao-2.4.exe。本版修复部分微信合并转发卡片显示为 XML 的问题。"

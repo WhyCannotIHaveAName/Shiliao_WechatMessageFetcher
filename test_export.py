@@ -1,4 +1,5 @@
 import hashlib
+import datetime as dt
 import io
 import json
 import sqlite3
@@ -12,8 +13,53 @@ from database import Session
 from exporter import export_chats, parse_message
 from media import decode_dat, V2, wxgf_preview, valid_image, key_signature
 from snapshot import snapshot, committed_wal, wal_checksum
+from time_filter import parse_time_range, quick_range
 
 class ExportTests(unittest.TestCase):
+    def test_time_ranges_and_shortcuts(self):
+        stamp = lambda day, hour=0: dt.datetime(2026, 11, day, hour).timestamp()
+        self.assertEqual(parse_time_range(' 2026-11-09-1 ', '2026-11-09-2'), (stamp(9,1),stamp(9,2)))
+        self.assertEqual(parse_time_range('2026-11-09', '2026-11-09'), (stamp(9),stamp(10)))
+        self.assertEqual(parse_time_range('', '2026-11-09-0'), (None,stamp(9)))
+        self.assertEqual(parse_time_range('2026-11-09-23', ''), (stamp(9,23),None))
+        self.assertEqual(parse_time_range('', ' '), (None,None))
+        for start,end in [('2026-11-09-24',''),('2026-02-30',''),('2026-11-09--1',''),
+                          ('2026-11-09-1','2026-11-09-1'),('2026-11-10','2026-11-09'),
+                          ('2026-11-09-1:30',''),('','invalid')]:
+            with self.subTest(start=start,end=end), self.assertRaises(ValueError):
+                parse_time_range(start,end)
+        today = dt.date(2026,1,1)
+        self.assertEqual(quick_range('today',today), ('2026-01-01','2026-01-01'))
+        self.assertEqual(quick_range('yesterday',today), ('2025-12-31','2025-12-31'))
+        self.assertEqual(quick_range('week',today), ('2025-12-25','2026-01-01'))
+        self.assertEqual(quick_range('all',today), ('',''))
+
+    def test_hour_filter_export_boundaries(self):
+        start,end = parse_time_range('2026-11-09-1','2026-11-09-2')
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Session(scratch=tmp)
+            try:
+                path = session.cache/'message_0.db'
+                table = 'Msg_'+hashlib.md5(b'friend').hexdigest()
+                con = sqlite3.connect(path)
+                con.execute('CREATE TABLE Name2Id(user_name TEXT)')
+                con.execute("INSERT INTO Name2Id VALUES ('alice')")
+                con.execute('CREATE TABLE '+table+'(local_id INTEGER,local_type INTEGER,real_sender_id INTEGER,create_time INTEGER,message_content TEXT,sort_seq INTEGER)')
+                con.executemany('INSERT INTO '+table+' VALUES (?,?,?,?,?,?)',
+                    [(i,1,1,int(t),'message '+str(i),i) for i,t in enumerate((start-1,start,end-1,end),1)])
+                con.commit()
+                con.close()
+                session.shards.append(path)
+                session.index()
+                output,stats = export_chats(session,session.chats,tmp,start,end,include_images=False)
+                records = json.loads(next(output.glob('*/*.json')).read_text('utf8'))
+                self.assertEqual(stats['messages'],2)
+                self.assertEqual([m['local_id'] for m in records],[2,3])
+                full_start,full_end = parse_time_range('2026-11-09','2026-11-09')
+                self.assertEqual(len(list(session.messages(session.chats[0],full_start,full_end))),4)
+            finally:
+                session.close()
+
     def test_wrapped_declaration_in_forwarded_card(self):
         from exporter import html_message
         count = 100

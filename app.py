@@ -23,6 +23,7 @@ from tkinter import ttk, filedialog, messagebox
 from database import Session
 from exporter import export_chats
 from version import VERSION
+from time_filter import parse_time_range, quick_range
 
 class App(tk.Tk):
     def __init__(self):
@@ -83,13 +84,20 @@ class App(tk.Tk):
         self.tree.bind('<Button-1>',self.toggle)
         ttk.Label(body,textvariable=self.selection_status).pack(anchor='w')
         dates = ttk.Frame(body)
-        dates.pack(fill='x',pady=12)
-        ttk.Label(dates,text='日期范围').pack(side='left')
-        ttk.Entry(dates,textvariable=self.start,width=13).pack(side='left',padx=8)
+        dates.pack(fill='x',pady=(12,4))
+        ttk.Label(dates,text='时间范围').pack(side='left')
+        ttk.Entry(dates,textvariable=self.start,width=17).pack(side='left',padx=8)
         ttk.Label(dates,text='至').pack(side='left')
-        ttk.Entry(dates,textvariable=self.end,width=13).pack(side='left',padx=8)
-        ttk.Label(dates,text='YYYY-MM-DD，留空为全部').pack(side='left')
+        ttk.Entry(dates,textvariable=self.end,width=17).pack(side='left',padx=8)
         ttk.Checkbutton(dates,text='导出本地图片',variable=self.pictures).pack(side='right')
+        ttk.Label(body,text='可填 2026-11-09-1 表示 1:00；结束整点不包含，结束日期包含全天。留空不限。').pack(anchor='w')
+        shortcuts = ttk.Frame(body)
+        shortcuts.pack(fill='x',pady=(4,12))
+        self.time_buttons = {}
+        for preset,label in [('today','今天'),('yesterday','昨天'),('week','一周前至今'),('all','全部时间')]:
+            button = ttk.Button(shortcuts,text=label,command=lambda p=preset:self.set_time_range(p))
+            button.pack(side='left',padx=(0,8))
+            self.time_buttons[preset] = button
         outrow = ttk.Frame(body)
         outrow.pack(fill='x')
         ttk.Label(outrow,text='保存位置').pack(side='left')
@@ -199,12 +207,9 @@ class App(tk.Tk):
             messagebox.showinfo('选择会话','请先勾选需要导出的会话。')
             return
         try:
-            start = dt.datetime.strptime(self.start.get().strip(),'%Y-%m-%d') if self.start.get().strip() else None
-            end = dt.datetime.strptime(self.end.get().strip(),'%Y-%m-%d')+dt.timedelta(days=1) if self.end.get().strip() else None
-            if start and end and start >= end:
-                raise ValueError()
-        except ValueError:
-            messagebox.showerror('日期格式','请输入 YYYY-MM-DD，并确保结束日期不早于开始日期。')
+            start,end = parse_time_range(self.start.get(),self.end.get())
+        except ValueError as exc:
+            messagebox.showerror('时间范围',str(exc))
             return
         directory = self.output_dir.get().strip()
         if not directory:
@@ -213,10 +218,15 @@ class App(tk.Tk):
         chats = [c for k,c in self.chats.items() if k in self.selected]
         pictures = self.pictures.get()
         def task():
-            output,summary = export_chats(self.session,chats,directory,start.timestamp() if start else None,end.timestamp() if end else None,pictures)
+            output,summary = export_chats(self.session,chats,directory,start,end,pictures)
             self.events.put(('exported',(output,summary)))
         self.status.set('正在准备导出…')
         self.run_task(task)
+
+    def set_time_range(self, preset):
+        start,end = quick_range(preset)
+        self.start.set(start)
+        self.end.set(end)
 
     def open_output(self):
         path = self.last_output or Path(self.output_dir.get())
@@ -278,6 +288,9 @@ if __name__ == '__main__':
         assert not window.tree.get_children()
         assert window.selected == {'a'}
         window.clear_selection()
+        for preset,button in window.time_buttons.items():
+            button.invoke()
+            assert (window.start.get(),window.end.get()) == quick_range(preset)
         window.update_idletasks()
         window.destroy()
         output = io.StringIO()

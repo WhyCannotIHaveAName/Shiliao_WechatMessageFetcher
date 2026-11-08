@@ -1,6 +1,6 @@
-# 拾聊 2.4 Windows 版
+# 拾聊 2.5 Windows 版
 
-从 [GitHub Releases 下载 Shiliao-2.4-Windows.zip](https://github.com/WhyCannotIHaveAName/Shiliao_WechatMessageFetcher/releases/download/v2.4/Shiliao-2.4-Windows.zip)，解压整个压缩包，然后打开 `Shiliao-2.4\Shiliao-2.4.exe`。在导出的 HTML 里点击「展开聊天记录」即可阅读合并转发中的消息。如果里面还有一份聊天记录，可以继续展开。TXT 用缩进表示层级，JSON 用 forwarded 数组保存各层消息。只有摘要或缺少本地图片时会保留相应说明。
+从 [GitHub Releases 下载 Shiliao-2.5-Windows.zip](https://github.com/WhyCannotIHaveAName/Shiliao_WechatMessageFetcher/releases/download/v2.5/Shiliao-2.5-Windows.zip)，解压整个压缩包，然后打开 `Shiliao-2.5\Shiliao-2.5.exe`。在导出的 HTML 里点击「展开聊天记录」即可阅读合并转发中的消息。如果里面还有一份聊天记录，可以继续展开。TXT 用缩进表示层级，JSON 用 forwarded 数组保存各层消息。只有摘要或缺少本地图片时会保留相应说明。
 
 2.2 版支持从本机微信缓存识别图片密钥，适用于迁移到其他盘的账号目录。已用真实迁移目录验证图片导出，详细范围见 `TESTING.md`。
 
@@ -9,12 +9,14 @@
 ## 使用
 
 1. 解压整个压缩包，保留可执行文件旁的 `_internal` 文件夹。
-2. 保持电脑微信已登录，双击 `Shiliao-2.4.exe`。
+2. 保持电脑微信已登录，双击 `Shiliao-2.5.exe`。
 3. 点击“读取本地记录”。自动查找失败时，选择微信设置中显示的 `xwechat_files` 数据目录或其中的账号文件夹。多个账号时可选择具体账号目录。
-4. 点击列表中的会话勾选，可搜索、全选当前结果。输入日期可选，格式 `YYYY-MM-DD`，结束日期包含当天。
+4. 点击列表中的会话勾选，可搜索、全选当前结果。可手填时间范围，也可点击“今天”“昨天”“一周前至今”“全部时间”。日期格式 `YYYY-MM-DD`；小时格式 `YYYY-MM-DD-H`，例如 `2026-11-09-1` 表示当天 1:00。小时为 0–23，留空不限。开始时间包含在内，结束整点不包含；仅填结束日期时包含全天。
 5. 选择保存位置，点击“导出所选会话”。完成后点击“打开导出文件夹”，打开其中的 `打开聊天记录.html`。
 
 每个会话都有 HTML、UTF-8 TXT、JSON 和图片 assets 文件夹。复制导出结果时请复制整个文件夹。JSON 保留原始消息内容、类型码、发送者账号、显示名和时间戳；HTML 中非文本消息可展开“原始消息信息”。群聊按每条消息的发信方映射显示，无法确定时保留账号或显示未知发送者。
+
+例如开始填 `2026-11-09-1`、结束填 `2026-11-09-2`，导出当天 1:00 至 2:00 之前的消息。“今天”“昨天”选择对应整天；“一周前至今”从本机日期的七天前 0:00 到今天结束；“全部时间”清空两端。时间按电脑本地时区解释。
 
 ## 图片与其他类型
 
@@ -43,9 +45,9 @@ python -m venv .venv
 $env:TCL_LIBRARY='vendor/tcl8.6'
 $env:TK_LIBRARY='vendor/tk8.6'
 .\.venv\Scripts\python -m PyInstaller --noconfirm Shiliao.spec
-$exe = Resolve-Path .\dist\Shiliao-2.4\Shiliao-2.4.exe
+$exe = Resolve-Path .\dist\Shiliao-2.5\Shiliao-2.5.exe
 $report = Join-Path (Get-Location) 'packaged-test.json'
-$p = Start-Process $exe -ArgumentList @('--self-test', ('"' + $report + '"')) -PassThru -Wait
+$p = Start-Process $exe -ArgumentList @('--self-test', ('"' + $report + '"')) -WindowStyle Hidden -PassThru -Wait
 if ($p.ExitCode -ne 0 -or !(Get-Content -Raw $report | ConvertFrom-Json).passed) { throw 'Self-test failed' }
 .\.venv\Scripts\python package_release.py
 ```

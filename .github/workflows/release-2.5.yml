@@ -1,0 +1,75 @@
+name: Publish Windows 2.5
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/release-2.5.yml']
+
+concurrency:
+  group: windows-release-2.5
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.txt
+      - run: python fetch_tk_resources.py
+      - name: Match Tcl/Tk scripts to the runner's native libraries
+        shell: python
+        run: |
+          import pathlib, shutil, tkinter
+          root = tkinter.Tk()
+          for name, source in [('tcl8.6', root.tk.call('info', 'library')),
+                               ('tk8.6', root.tk.getvar('tk_library'))]:
+              destination = pathlib.Path('vendor') / name
+              shutil.copytree(str(source), destination, dirs_exist_ok=True)
+          root.destroy()
+      - run: python test_export.py
+      - run: python -m PyInstaller --noconfirm Shiliao.spec
+      - name: Test executable and package it
+        shell: pwsh
+        run: |
+          $report = Join-Path $PWD 'packaged-test.json'
+          $proc = Start-Process '.\dist\Shiliao-2.5\Shiliao-2.5.exe' -ArgumentList @('--self-test', ('"' + $report + '"')) -WindowStyle Hidden -PassThru
+          if (!$proc.WaitForExit(90000)) {
+            $proc.Refresh()
+            Write-Error "Self-test timed out. Window: $($proc.MainWindowTitle)" -ErrorAction Continue
+            Stop-Process -Id $proc.Id
+            throw 'Self-test timed out'
+          }
+          $result = Get-Content -Raw $report | ConvertFrom-Json
+          if ($proc.ExitCode -ne 0 -or !$result.passed -or $result.tests -lt 12) { throw 'Packaged tests failed' }
+          python package_release.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item -LiteralPath 'outputs/拾聊-2.5-Windows.zip' -Destination 'Shiliao-2.5-Windows.zip'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-2.5
+          path: Shiliao-2.5-Windows.zip
+          if-no-files-found: error
+
+  publish:
+    needs: windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-2.5
+      - name: Publish tested Windows archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create v2.5 Shiliao-2.5-Windows.zip --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "拾聊 2.5 · Windows" --notes "解压 Shiliao-2.5-Windows.zip，运行 Shiliao-2.5.exe。新增小时精度筛选（如 2026-11-09-1）及今天、昨天、一周前至今、全部时间快捷按钮。结束整点不包含，结束日期包含全天。"

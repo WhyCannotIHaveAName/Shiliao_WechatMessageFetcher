@@ -1,0 +1,41 @@
+name: Publish Android 2.6.1 Preview 1
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/release-android-2.6.1-preview.1.yml']
+
+concurrency:
+  group: android-2.6.1-preview.1
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: v2.6.1-android-preview.1
+      ASSET: Shiliao-Android-2.6.1-preview.1.apk
+      APK_BLOB: adbf5a7395c1a8e3a44cd02ef1619360ccc38151
+      APK_SHA256: 1813053476a3c5186e5b4c2d88679a574145b86da52af4ced69f6443e5cec984
+    steps:
+      - name: Publish the verified signed APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url >/dev/null 2>&1; then
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$ASSET"
+            printf '%s  %s\n' "$APK_SHA256" "$ASSET" | sha256sum --check
+            exit 0
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/git/blobs/$APK_BLOB" --jq .content | base64 --decode > "$ASSET"
+          printf '%s  %s\n' "$APK_SHA256" "$ASSET" | sha256sum --check
+          gh release create "$TAG" "$ASSET" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "拾聊 2.6.1 · Android 预览版 1" --prerelease \
+            --notes "Android 8.0 及以上。通过 ZIP 或 JSON 导入拾聊档案，支持两套工作区、搜索、收藏与再导出。在 Android 15 模拟器验证。SHA-256：$APK_SHA256"

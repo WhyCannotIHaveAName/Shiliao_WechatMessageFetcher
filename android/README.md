@@ -1,6 +1,6 @@
-# 拾聊 Android 预览版
+# 拾聊 Android 2.6.1 预览版
 
-将签名 APK 传到手机，在系统文件管理器中打开并安装。安装包声明支持 Android 8.0 及以上，当前验收环境见下文。
+[下载签名 APK](https://github.com/WhyCannotIHaveAName/Shiliao_WechatMessageFetcher/releases/download/v2.6.1-android-preview.1/Shiliao-Android-2.6.1-preview.1.apk)，传到手机后在系统文件管理器中打开并安装。安装包声明支持 Android 8.0 及以上，测试环境见下文。
 
 ## 导入电脑档案
 

@@ -12,10 +12,252 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from database import Session
 from exporter import export_chats, parse_message
 from media import decode_dat, V2, wxgf_preview, valid_image, key_signature
+from moments import export_moments, load_moments
 from snapshot import snapshot, committed_wal, wal_checksum
 from time_filter import parse_time_range, quick_range
 
+
+def moment_xml(timestamp, body='', content=''):
+    return (f"<SnsDataItem><TimelineObject><username>alice</username><createTime>{timestamp}</createTime>"
+            f"<contentDesc><![CDATA[{body}]]></contentDesc><ContentObject>{content}</ContentObject>"
+            "</TimelineObject></SnsDataItem>")
+
+
+def moment_database(path, rows):
+    with sqlite3.connect(path) as con:
+        con.execute('CREATE TABLE SnsTimeLine(tid INTEGER PRIMARY KEY, user_name TEXT, content TEXT)')
+        con.executemany("INSERT INTO SnsTimeLine VALUES (?, 'alice', ?)", rows)
+    con.close()
+
+
+def check_desktop(window):
+    import time
+    chat, moments = window.pages['chat'], window.pages['moments']
+    window.geometry('660x370')
+    window.update()
+
+    def check_footer(page):
+        for button in (page.export_button, page.cancel_button, page.open_button):
+            assert button.winfo_ismapped()
+            assert button.winfo_width() >= button.winfo_reqwidth()
+            assert button.winfo_rootx() + button.winfo_width() <= window.winfo_rootx() + window.winfo_width()
+            assert button.winfo_rooty() + button.winfo_height() <= window.winfo_rooty() + window.winfo_height()
+        assert page.body.canvas.winfo_height() > 0
+
+    check_footer(chat)
+    chat.chats = {'a':{'id':'a','name':'测试会话','username':'test','count':302,'last':1700000000}}
+    chat.render_results()
+    chat.select_visible()
+    chat.search.set('不存在')
+    chat.render_results()
+    assert not chat.tree.get_children() and chat.selected == {'a'}
+    for preset, button in chat.time_buttons.items():
+        button.invoke()
+        assert (chat.start.get(), chat.end.get()) == quick_range(preset)
+    chat.start.set('2026-11-16')
+    y = chat.export_button.winfo_rooty()
+    chat.search_entry.event_generate('<MouseWheel>', delta=-120)
+    window.update()
+    assert chat.body.canvas.yview()[0] > 0 and chat.export_button.winfo_rooty() == y
+    chat.body.canvas.yview_moveto(1)
+    window.update()
+    assert chat.output_entry.winfo_rooty() + chat.output_entry.winfo_height() \
+        <= chat.body.canvas.winfo_rooty() + chat.body.canvas.winfo_height()
+
+    window.nav['moments'].invoke()
+    window.update()
+    check_footer(moments)
+    assert not chat.winfo_ismapped() and moments.start.get() == ''
+    with tempfile.TemporaryDirectory() as directory:
+        session = Session(scratch=directory)
+        try:
+            moment_database(session.cache/'sns.db', [(1, moment_xml(1700000000, '按钮验收')),
+                                                     (2, moment_xml(1700000001, '另一个动态'))])
+            session.moment_count = 2
+            session.moment_status = '本机朋友圈 2 条（筛选日期前）'
+            moments.set_session((session, load_moments(session), ''))
+            moments.search.set('验收')
+            moments.render_results()
+            assert len(moments.tree.get_children()) == 1
+            assert moments.export_button.instate(['!disabled'])
+            moments.root_dir.set(directory)
+            assert moments.export_button.instate(['disabled'])
+            moments.root_dir.set('')
+            moments.output_dir.set(directory)
+            moments.pictures.set(False)
+            moments.export_button.invoke()
+            deadline = time.monotonic() + 5
+            while window.busy and time.monotonic() < deadline:
+                window.update()
+                time.sleep(0.02)
+            assert not window.busy
+            assert '1 条朋友圈' in moments.status.get()
+            assert (moments.last_output/'朋友圈.html').is_file()
+            window.state('zoomed')
+            window.update()
+            check_footer(moments)
+            window.nav['chat'].invoke()
+            window.update()
+            check_footer(chat)
+            assert chat.start.get() == '2026-11-16' and chat.search.get() == '不存在'
+        finally:
+            session.close()
+            moments.session = None
+
+
 class ExportTests(unittest.TestCase):
+    def test_workspace_database_scopes(self):
+        from contextlib import closing
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            storage = root/'account'/'db_storage'
+            for name in ('contact', 'sns', 'message'):
+                (storage/name).mkdir(parents=True)
+            moment_database(storage/'sns'/'sns.db', [(1, moment_xml(1700000000))])
+            with closing(sqlite3.connect(storage/'contact'/'contact.db')) as con, con:
+                con.execute('CREATE TABLE contact(username, nick_name, remark)')
+                con.execute("INSERT INTO contact VALUES ('alice', 'Alice', '发布者')")
+            table = 'Msg_' + hashlib.md5(b'alice').hexdigest()
+            with closing(sqlite3.connect(storage/'message'/'message_0.db')) as con, con:
+                con.execute(f'CREATE TABLE {table}(create_time)')
+                con.execute(f'INSERT INTO {table} VALUES (1700000000)')
+
+            def copy_plain(source, destination, material, check):
+                return snapshot(source, destination, None, check)
+
+            with (patch('database.native.MemoryKeys.candidates', side_effect=lambda: {(b'fixture', None)}),
+                  patch('database.native._verify_enc_key', return_value=True) as verify,
+                  patch('database.snapshot', side_effect=copy_plain) as copy):
+                with closing(Session(scratch=root)) as chat:
+                    self.assertEqual(chat.connect(storage.parent, scope='chat'), 1)
+                    self.assertEqual({call.args[0].name for call in copy.call_args_list},
+                                     {'contact.db', 'message_0.db'})
+                    self.assertEqual(verify.call_count, 2)
+                    self.assertFalse((chat.cache/'sns.db').exists())
+                copy.reset_mock()
+                verify.reset_mock()
+                with closing(Session(scratch=root)) as moments:
+                    self.assertEqual(moments.connect(storage.parent, scope='moments'), 1)
+                    self.assertEqual({call.args[0].name for call in copy.call_args_list},
+                                     {'contact.db', 'sns.db'})
+                    self.assertEqual(verify.call_count, 2)
+                    self.assertFalse(moments.shards)
+                    self.assertEqual(load_moments(moments).posts[0]['author'], '发布者')
+
+    def test_moments_keyword_reuses_timeline(self):
+        from contextlib import closing
+        with tempfile.TemporaryDirectory() as directory, closing(Session(scratch=directory)) as session:
+            path = session.cache/'sns.db'
+            moment_database(path, [
+                (1, moment_xml(1700000000, '【TEST】')),
+                (2, moment_xml(1700000001, content='<contentUrl>https://example.invalid/TeSt</contentUrl>')),
+                (3, moment_xml(1700000002, '无关动态')),
+            ])
+            timeline = load_moments(session)
+            path.unlink()
+            self.assertEqual([post['id'] for post in timeline.search('  test  ')], ['2', '1'])
+            output, stats = export_moments(session, directory, start=1700000001, include_images=False,
+                                           timeline=timeline, keyword='TEST')
+            self.assertEqual(stats['moments'], 1)
+            post = json.loads((output/'朋友圈.json').read_text('utf8'))[0]
+            self.assertEqual(post['id'], '2')
+
+    def test_moments_export_formats_and_image_cache(self):
+        from contextlib import closing
+        from zstandard import ZstdCompressor
+        with tempfile.TemporaryDirectory() as directory, closing(Session(scratch=directory)) as session:
+            root = Path(directory)
+            session.account = root / 'test_account'
+            session.contacts = {'alice': {'name': '发布者'}}
+            cache = session.account/'cache'/'2026-11'/'Sns'/'Img'/'ab'
+            cache.mkdir(parents=True)
+            picture = io.BytesIO()
+            Image.new('RGB', (23, 31), 'red').save(picture, 'JPEG')
+            raw = picture.getvalue()
+            digest = hashlib.md5(raw).hexdigest()
+            (cache/'local').write_bytes(raw + bytes(24))
+            other = io.BytesIO()
+            Image.new('RGB', (41, 27), 'blue').save(other, 'PNG')
+            candidate = other.getvalue()
+            (cache/'opaque').write_bytes(candidate)
+            Image.new('RGB', (20, 29), 'green').save(cache/'unlinked', 'PNG')
+            photo = (f'<media><type>2</type><url md5="{digest}"/><size width="23" height="31" '
+                     f'totalSize="{len(raw)}"/></media>')
+            tentative = (f'<media><type>2</type><url md5="{"a"*32}"/><size width="41" height="27" '
+                         f'totalSize="{len(candidate)}"/></media>')
+            missing = '<media><type>2</type><url md5="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"/></media>'
+            video = '<media><type>6</type><url>https://example.invalid/movie</url></media>'
+            content = (f'<contentUrl>https://example.invalid/?a=1&amp;b=2</contentUrl>'
+                       f'<title>分享 &amp; 标题</title><description>链接摘要</description>'
+                       f'<mediaList>{photo}{tentative}{missing}{video}</mediaList>')
+            good = moment_xml(1700000000, '多行\n<script>x</script>', content)
+            compression = ZstdCompressor().compress(good.encode())
+            rows = [
+                (9007199254740999, compression),
+                (2, moment_xml(1700000001, content='<contentUrl>javascript:alert(1)</contentUrl>')),
+                (3, '<broken'),
+                (4, moment_xml(1700000002, '越界')),
+            ]
+            moment_database(session.cache/'sns.db', rows)
+            output, stats = export_moments(session, root, 1700000000, 1700000002, include_cache=True)
+            records = json.loads((output/'朋友圈.json').read_text('utf8'))
+            self.assertEqual([post['id'] for post in records], ['2', '9007199254740999'])
+            self.assertEqual(records[1]['author'], '发布者')
+            self.assertEqual(records[1]['timestamp'], 1700000000)
+            self.assertEqual(dt.datetime.fromisoformat(records[1]['time']).timestamp(), 1700000000)
+            self.assertEqual(records[1]['text'], '多行\n<script>x</script>')
+            self.assertEqual(records[1]['links'][0]['description'], '链接摘要')
+            images = records[1]['images']
+            self.assertEqual([i['code'] for i in images], ['verified', 'candidate', 'missing'])
+            self.assertEqual((output/images[0]['file']).read_bytes(), raw)
+            self.assertEqual((output/images[1]['file']).read_bytes(), candidate)
+            markup = (output/'朋友圈.html').read_text('utf8')
+            self.assertIn('href="https://example.invalid/?a=1&amp;b=2"', markup)
+            self.assertIn('&lt;script&gt;', markup)
+            self.assertNotIn('href="javascript:', markup)
+            self.assertIn('<details><summary>链接封面', markup)
+            plain = (output/'朋友圈.txt').read_text('utf8')
+            self.assertIn('https://example.invalid/?a=1&b=2', plain)
+            self.assertIn(images[0]['file'], plain)
+            self.assertEqual(stats['without_time_excluded'], 1)
+            self.assertEqual(stats['cached_images'], 3)
+            gallery = (output/'本机图片缓存.html').read_text('utf8')
+            self.assertEqual(gallery.count('<img '), 3)
+            self.assertEqual(stats['state'], 'complete')
+
+            output, stats = export_moments(session, root, include_images=False)
+            self.assertEqual((stats['moments'], stats['parse_warnings']), (4, 1))
+            self.assertFalse(list((output/'assets').iterdir()))
+            self.assertFalse((output/'本机图片缓存.html').exists())
+
+    def test_moments_reject_ambiguous_cache_candidate(self):
+        from contextlib import closing
+        with tempfile.TemporaryDirectory() as directory, closing(Session(scratch=directory)) as session:
+            session.account = Path(directory)
+            cache = session.account/'cache'/'2026-11'/'Sns'/'Img'
+            cache.mkdir(parents=True)
+            Image.new('RGB',(27,19),'green').save(cache/'item','PNG')
+            size = (cache/'item').stat().st_size
+            content = (f'<mediaList><media><type>2</type><url md5="{{}}"/>'
+                       f'<size width="27" height="19" totalSize="{size}"/></media></mediaList>')
+            moment_database(session.cache/'sns.db', [
+                (1, moment_xml(1700000000, content=content.format('a'*32))),
+                (2, moment_xml(1700000001, content=content.format('b'*32))),
+            ])
+            _, stats = export_moments(session, directory, end=1700000001)
+            self.assertEqual((stats['moments'], stats['candidate_images'], stats['unavailable_images']), (1, 0, 1))
+
+    def test_moments_cancellation_marks_output_incomplete(self):
+        from contextlib import closing
+        with tempfile.TemporaryDirectory() as directory, closing(Session(scratch=directory)) as session:
+            moment_database(session.cache/'sns.db', [(1, moment_xml(1700000000))])
+            session.cancel.set()
+            with self.assertRaises(InterruptedError):
+                export_moments(session, directory, include_images=False)
+            report = next(Path(directory).glob('*.未完成/导出统计.json'))
+            self.assertEqual(json.loads(report.read_text('utf8'))['reason'], 'cancelled')
+
     def test_time_ranges_and_shortcuts(self):
         stamp = lambda day, hour=0: dt.datetime(2026, 11, day, hour).timestamp()
         self.assertEqual(parse_time_range(' 2026-11-09-1 ', '2026-11-09-2'), (stamp(9,1),stamp(9,2)))

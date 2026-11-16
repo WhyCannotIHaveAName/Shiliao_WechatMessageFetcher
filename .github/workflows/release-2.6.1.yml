@@ -1,0 +1,76 @@
+name: Publish Windows 2.6.1
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/release-2.6.1.yml']
+
+concurrency:
+  group: windows-release-2.6.1
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.txt
+      - run: python fetch_tk_resources.py
+      - name: Match Tcl/Tk scripts to the runner's native libraries
+        shell: python
+        run: |
+          from pathlib import Path
+          import shutil
+          import tkinter
+          root = tkinter.Tk()
+          for name, source in [('tcl8.6', root.tk.call('info', 'library')),
+                               ('tk8.6', root.tk.getvar('tk_library'))]:
+              shutil.copytree(str(source), Path('vendor') / name, dirs_exist_ok=True)
+          root.destroy()
+      - run: python -X utf8 test_export.py
+      - run: python -m PyInstaller --noconfirm Shiliao.spec
+      - name: Test executable and package it
+        shell: pwsh
+        run: |
+          $report = Join-Path $PWD 'packaged-test.json'
+          $exe = Resolve-Path -LiteralPath './dist/Shiliao-2.6.1/Shiliao-2.6.1.exe'
+          $proc = Start-Process $exe -ArgumentList @('--self-test', ('"' + $report + '"')) -WindowStyle Hidden -PassThru
+          if (!$proc.WaitForExit(90000)) {
+            Stop-Process -Id $proc.Id
+            throw 'Packaged self-test timed out'
+          }
+          $result = Get-Content -Raw -Encoding UTF8 $report | ConvertFrom-Json
+          if ($proc.ExitCode -ne 0 -or !$result.passed -or $result.tests -lt 17) { throw 'Packaged tests failed' }
+          python -X utf8 package_release.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item -LiteralPath 'outputs/拾聊-2.6.1-Windows.zip' -Destination 'Shiliao-2.6.1-Windows.zip'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-2.6.1
+          path: Shiliao-2.6.1-Windows.zip
+          if-no-files-found: error
+
+  publish:
+    needs: windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-2.6.1
+      - name: Publish Windows release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create v2.6.1 Shiliao-2.6.1-Windows.zip --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "拾聊 2.6.1 · Windows" --notes "独立的聊天记录和朋友圈工作区，支持关键词搜索和本机导出。内容可滚动，导出按钮固定在底栏。解压整个 ZIP 后运行 Shiliao-2.6.1.exe。"

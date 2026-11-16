@@ -14,7 +14,7 @@ if release.resolve().parent.parent != root or not (release/(BUILD_NAME+'.exe')).
     raise ValueError('Expected the versioned executable in a local build directory')
 source=release/'source'
 source.mkdir(exist_ok=True)
-files=['app.py','database.py','exporter.py','media.py','native.py','snapshot.py','version.py','time_filter.py','Shiliao.spec','package_release.py','PYTHON-LICENSE.txt',
+files=['app.py','desktop_ui.py','database.py','exporter.py','moments.py','media.py','native.py','snapshot.py','version.py','time_filter.py','Shiliao.spec','package_release.py','PYTHON-LICENSE.txt',
        'offline_guard.py','test_export.py','fetch_tk_resources.py','requirements.txt',
        'README.md','NOTICE.txt','LICENSE-Apache-2.0.txt','TESTING.md']
 for name in files:

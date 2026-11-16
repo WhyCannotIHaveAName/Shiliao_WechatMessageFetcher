@@ -40,6 +40,8 @@ class Session:
         self.chats = []
         self.shards = []
         self.image_key = None
+        self.moment_count = 0
+        self.moment_status = '尚未读取朋友圈'
 
     def check(self):
         if self.cancel.is_set():
@@ -65,21 +67,27 @@ class Session:
         for acc in accounts:
             keys = {}
             paths = db_files(acc)
-            for p in paths:
+            sns = acc / 'db_storage' / 'sns' / 'sns.db'
+            for p in paths + ([sns] if sns.is_file() else []):
                 self.check()
-                with p.open("rb") as stream:
-                    page = stream.read(4096)
+                try:
+                    with p.open("rb") as stream:
+                        page = stream.read(4096)
+                except OSError:
+                    if p == sns:
+                        continue
+                    raise
                 for key, salt in candidates:
                     if native._verify_enc_key(key, page, salt):
                         keys[p] = key + (salt or b"")
                         break
             if keys:
-                matches.append((acc, paths, keys))
+                matches.append((acc, paths, sns, keys))
         if len(matches) > 1:
             raise RuntimeError("检测到多个已登录账号，请选择具体账号目录后读取。")
         if not matches:
             raise RuntimeError("未能取得此账号的数据库密钥。请确认电脑微信已登录，且所选目录属于当前账号。")
-        self.account, paths, keys = matches[0]
+        self.account, paths, sns, keys = matches[0]
         missing = [p.name for p in paths if p not in keys]
         if missing:
             raise RuntimeError("以下数据库尚未取得密钥，读取未完成：" + "、".join(missing))
@@ -89,10 +97,33 @@ class Session:
             dst = snapshot(p, self.cache / p.name, keys[p], self.check)
             if re.fullmatch(r"message_\d+\.db", p.name):
                 self.shards.append(dst)
+        self.index_moments(sns, keys.get(sns))
         keys.clear()
         candidates.clear()
         self.index()
         return len(self.chats)
+
+    def index_moments(self, source, material):
+        self.moment_count = 0
+        if not source.is_file():
+            self.moment_status = '本机账号目录没有朋友圈数据库'
+            return
+        if not material:
+            self.moment_status = '朋友圈暂不可读，请在电脑微信打开朋友圈，再点「读取本地记录」'
+            return
+        self.progress('正在读取本地朋友圈…')
+        try:
+            path = snapshot(source, self.cache / 'sns.db', material, self.check)
+            with closing(readonly(path)) as con:
+                # Resolve the columns here so an incompatible database is reported before export.
+                con.execute('SELECT tid, user_name, content FROM SnsTimeLine LIMIT 0')
+                self.moment_count = con.execute('SELECT count(*) FROM SnsTimeLine').fetchone()[0]
+        except InterruptedError:
+            raise
+        except (OSError, ValueError, RuntimeError, sqlite3.Error):
+            self.moment_status = '朋友圈数据库读取失败，请重新读取或检查微信版本'
+            return
+        self.moment_status = f'本机朋友圈 {self.moment_count:,} 条（筛选日期前）'
 
     def index(self):
         names, index = {}, {}

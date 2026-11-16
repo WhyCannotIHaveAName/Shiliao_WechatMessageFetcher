@@ -22,13 +22,14 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from database import Session
 from exporter import export_chats
+from moments import export_moments
 from version import VERSION
 from time_filter import parse_time_range, quick_range
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title(f'拾聊 {VERSION} · 微信聊天记录导出')
+        self.title(f'拾聊 {VERSION} · 微信聊天与朋友圈导出')
         self.geometry('980x740')
         self.minsize(780,600)
         self.events = queue.Queue()
@@ -45,8 +46,10 @@ class App(tk.Tk):
         self.start = tk.StringVar()
         self.end = tk.StringVar()
         self.pictures = tk.BooleanVar(value=True)
+        self.moment_cache = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value='请先登录电脑微信，然后点击“读取本地记录”。')
         self.selection_status = tk.StringVar(value='尚未读取会话')
+        self.moment_status = tk.StringVar(value='尚未读取朋友圈')
         style = ttk.Style(self)
         style.theme_use('clam')
         style.configure('.',font=('Microsoft YaHei UI',10))
@@ -54,7 +57,7 @@ class App(tk.Tk):
         body = ttk.Frame(self,padding=22)
         body.pack(fill='both',expand=True)
         ttk.Label(body,text='拾聊',font=('Microsoft YaHei UI',23,'bold')).pack(anchor='w')
-        ttk.Label(body,text='批量导出本机聊天记录 · HTML / TXT / JSON · 无固定条数上限').pack(anchor='w',pady=(0,15))
+        ttk.Label(body,text='导出本机聊天记录与朋友圈 · HTML / TXT / JSON').pack(anchor='w',pady=(0,15))
         source = ttk.Frame(body)
         source.pack(fill='x')
         ttk.Label(source,text='数据目录').pack(side='left')
@@ -83,6 +86,7 @@ class App(tk.Tk):
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.bind('<Button-1>',self.toggle)
         ttk.Label(body,textvariable=self.selection_status).pack(anchor='w')
+        ttk.Label(body,textvariable=self.moment_status).pack(anchor='w')
         dates = ttk.Frame(body)
         dates.pack(fill='x',pady=(12,4))
         ttk.Label(dates,text='时间范围').pack(side='left')
@@ -98,6 +102,8 @@ class App(tk.Tk):
             button = ttk.Button(shortcuts,text=label,command=lambda p=preset:self.set_time_range(p))
             button.pack(side='left',padx=(0,8))
             self.time_buttons[preset] = button
+        ttk.Checkbutton(shortcuts,text='附带整个朋友圈图片缓存（所有日期）',
+                        variable=self.moment_cache).pack(side='right')
         outrow = ttk.Frame(body)
         outrow.pack(fill='x')
         ttk.Label(outrow,text='保存位置').pack(side='left')
@@ -107,6 +113,8 @@ class App(tk.Tk):
         actions.pack(fill='x',pady=12)
         self.export_button = ttk.Button(actions,text='导出所选会话',command=self.export,state='disabled')
         self.export_button.pack(side='left')
+        self.moment_button = ttk.Button(actions,text='导出朋友圈',command=self.export_moments,state='disabled')
+        self.moment_button.pack(side='left',padx=(8,0))
         self.cancel_button = ttk.Button(actions,text='取消任务',command=self.cancel.set,state='disabled')
         self.cancel_button.pack(side='left',padx=8)
         ttk.Button(actions,text='打开导出文件夹',command=self.open_output).pack(side='right')
@@ -117,7 +125,7 @@ class App(tk.Tk):
         self.after(100,self.poll)
 
     def busy(self):
-        return self.worker is not None and self.worker.is_alive()
+        return self.worker is not None
 
     def choose_source(self):
         if not self.busy():
@@ -136,6 +144,7 @@ class App(tk.Tk):
         self.cancel.clear()
         self.connect_button.configure(state='disabled')
         self.export_button.configure(state='disabled')
+        self.moment_button.configure(state='disabled')
         self.cancel_button.configure(state='normal')
         self.progressbar.start(12)
         def target():
@@ -163,10 +172,11 @@ class App(tk.Tk):
                 s.close()
                 raise
             self.session = s
-            self.events.put(('connected',s.chats))
+            self.events.put(('connected',(s.chats,s.moment_status)))
         self.chats = {}
         self.selected.clear()
         self.render_chats()
+        self.moment_status.set('正在读取朋友圈…')
         self.status.set('正在读取本地记录，请稍候…')
         self.run_task(task)
 
@@ -206,6 +216,15 @@ class App(tk.Tk):
         if not self.session or not self.selected:
             messagebox.showinfo('选择会话','请先勾选需要导出的会话。')
             return
+        chats = [c for k,c in self.chats.items() if k in self.selected]
+        self.start_export(lambda *args: export_chats(self.session,chats,*args),'exported')
+
+    def export_moments(self):
+        include_cache = self.moment_cache.get()
+        self.start_export(lambda *args: export_moments(self.session,*args,include_cache=include_cache),
+                          'moments_exported')
+
+    def start_export(self, exporter, event):
         try:
             start,end = parse_time_range(self.start.get(),self.end.get())
         except ValueError as exc:
@@ -215,11 +234,9 @@ class App(tk.Tk):
         if not directory:
             messagebox.showerror('保存位置','请选择保存位置。')
             return
-        chats = [c for k,c in self.chats.items() if k in self.selected]
         pictures = self.pictures.get()
         def task():
-            output,summary = export_chats(self.session,chats,directory,start,end,pictures)
-            self.events.put(('exported',(output,summary)))
+            self.events.put((event,exporter(directory,start,end,pictures)))
         self.status.set('正在准备导出…')
         self.run_task(task)
 
@@ -244,16 +261,32 @@ class App(tk.Tk):
                     if not self.closing:
                         messagebox.showerror('任务未完成',value)
                 elif event == 'connected':
-                    self.chats = {c['id']:c for c in value}
+                    chats,moment_status = value
+                    self.chats = {c['id']:c for c in chats}
+                    self.moment_status.set(moment_status)
                     self.render_chats()
-                    self.status.set('读取完成。请勾选会话后导出；图片仅导出电脑上已有的文件。')
+                    self.status.set('读取完成。时间范围和图片选项适用于两种导出。')
                 elif event == 'exported':
                     self.last_output,summary = value
                     self.status.set('导出完成：%d 条消息，%d 张可查看图片，%d 条图片记录未取得可查看图片。' % (summary['messages'],summary['images'],summary['unavailable_images']))
+                elif event == 'moments_exported':
+                    self.last_output,summary = value
+                    status = f"导出完成 · {summary['moments']:,} 条朋友圈，{summary['links']:,} 个链接"
+                    if summary['include_images']:
+                        status += (f"，{summary['verified_images']:,} 张已校验图片，"
+                                   f"{summary['candidate_images']:,} 张待核对，"
+                                   f"{summary['unavailable_images']:,} 张未匹配")
+                    if summary['include_cache']:
+                        status += f"，本机图片缓存 {summary['cached_images']:,} 张"
+                    self.status.set(status + '。')
                 elif event == 'done':
+                    self.worker = None
                     self.progressbar.stop()
                     self.connect_button.configure(state='normal')
                     self.export_button.configure(state='normal' if self.session else 'disabled')
+                    self.moment_button.configure(state='normal' if self.session and self.session.moment_count else 'disabled')
+                    if self.session is None:
+                        self.moment_status.set('尚未读取朋友圈')
                     self.cancel_button.configure(state='disabled')
         except queue.Empty:
             pass
@@ -291,6 +324,7 @@ if __name__ == '__main__':
         for preset,button in window.time_buttons.items():
             button.invoke()
             assert (window.start.get(),window.end.get()) == quick_range(preset)
+        test_export.check_moments_button(window)
         window.update_idletasks()
         window.destroy()
         output = io.StringIO()

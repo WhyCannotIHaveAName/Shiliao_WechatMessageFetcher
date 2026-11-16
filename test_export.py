@@ -12,10 +12,148 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from database import Session
 from exporter import export_chats, parse_message
 from media import decode_dat, V2, wxgf_preview, valid_image, key_signature
+from moments import export_moments
 from snapshot import snapshot, committed_wal, wal_checksum
 from time_filter import parse_time_range, quick_range
 
+
+def moment_xml(timestamp, body='', content=''):
+    return (f"<SnsDataItem><TimelineObject><username>alice</username><createTime>{timestamp}</createTime>"
+            f"<contentDesc><![CDATA[{body}]]></contentDesc><ContentObject>{content}</ContentObject>"
+            "</TimelineObject></SnsDataItem>")
+
+
+def moment_database(path, rows):
+    with sqlite3.connect(path) as con:
+        con.execute('CREATE TABLE SnsTimeLine(tid INTEGER PRIMARY KEY, user_name TEXT, content TEXT)')
+        con.executemany("INSERT INTO SnsTimeLine VALUES (?, 'alice', ?)", rows)
+    con.close()
+
+
+def check_moments_button(window):
+    import time
+    with tempfile.TemporaryDirectory() as directory:
+        session = Session(scratch=directory)
+        try:
+            moment_database(session.cache/'sns.db', [(1, moment_xml(1700000000,'按钮验收'))])
+            session.moment_count = 1
+            session.moment_status = '本机朋友圈 1 条（筛选日期前）'
+            window.session = session
+            window.events.put(('connected', ([], session.moment_status)))
+            window.events.put(('done', None))
+            window.poll()
+            assert str(window.moment_button['state']) == 'normal'
+            window.output_dir.set(directory)
+            window.pictures.set(False)
+            window.moment_button.invoke()
+            deadline = time.monotonic() + 5
+            while window.busy() and time.monotonic() < deadline:
+                window.update()
+                time.sleep(0.02)
+            assert not window.busy()
+            assert '1 条朋友圈' in window.status.get()
+            assert (window.last_output/'朋友圈.html').is_file()
+        finally:
+            session.close()
+            window.session = None
+
+
 class ExportTests(unittest.TestCase):
+    def test_moments_export_formats_and_image_cache(self):
+        from contextlib import closing
+        from zstandard import ZstdCompressor
+        with tempfile.TemporaryDirectory() as directory, closing(Session(scratch=directory)) as session:
+            root = Path(directory)
+            session.account = root / 'test_account'
+            session.contacts = {'alice': {'name': '发布者'}}
+            cache = session.account/'cache'/'2026-11'/'Sns'/'Img'/'ab'
+            cache.mkdir(parents=True)
+            picture = io.BytesIO()
+            Image.new('RGB', (23, 31), 'red').save(picture, 'JPEG')
+            raw = picture.getvalue()
+            digest = hashlib.md5(raw).hexdigest()
+            (cache/'local').write_bytes(raw + bytes(24))
+            other = io.BytesIO()
+            Image.new('RGB', (41, 27), 'blue').save(other, 'PNG')
+            candidate = other.getvalue()
+            (cache/'opaque').write_bytes(candidate)
+            Image.new('RGB', (20, 29), 'green').save(cache/'unlinked', 'PNG')
+            photo = (f'<media><type>2</type><url md5="{digest}"/><size width="23" height="31" '
+                     f'totalSize="{len(raw)}"/></media>')
+            tentative = (f'<media><type>2</type><url md5="{"a"*32}"/><size width="41" height="27" '
+                         f'totalSize="{len(candidate)}"/></media>')
+            missing = '<media><type>2</type><url md5="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"/></media>'
+            video = '<media><type>6</type><url>https://example.invalid/movie</url></media>'
+            content = (f'<contentUrl>https://example.invalid/?a=1&amp;b=2</contentUrl>'
+                       f'<title>分享 &amp; 标题</title><description>链接摘要</description>'
+                       f'<mediaList>{photo}{tentative}{missing}{video}</mediaList>')
+            good = moment_xml(1700000000, '多行\n<script>x</script>', content)
+            compression = ZstdCompressor().compress(good.encode())
+            rows = [
+                (9007199254740999, compression),
+                (2, moment_xml(1700000001, content='<contentUrl>javascript:alert(1)</contentUrl>')),
+                (3, '<broken'),
+                (4, moment_xml(1700000002, '越界')),
+            ]
+            moment_database(session.cache/'sns.db', rows)
+            output, stats = export_moments(session, root, 1700000000, 1700000002, include_cache=True)
+            records = json.loads((output/'朋友圈.json').read_text('utf8'))
+            self.assertEqual([post['id'] for post in records], ['2', '9007199254740999'])
+            self.assertEqual(records[1]['author'], '发布者')
+            self.assertEqual(records[1]['timestamp'], 1700000000)
+            self.assertEqual(dt.datetime.fromisoformat(records[1]['time']).timestamp(), 1700000000)
+            self.assertEqual(records[1]['text'], '多行\n<script>x</script>')
+            self.assertEqual(records[1]['links'][0]['description'], '链接摘要')
+            images = records[1]['images']
+            self.assertEqual([i['code'] for i in images], ['verified', 'candidate', 'missing'])
+            self.assertEqual((output/images[0]['file']).read_bytes(), raw)
+            self.assertEqual((output/images[1]['file']).read_bytes(), candidate)
+            markup = (output/'朋友圈.html').read_text('utf8')
+            self.assertIn('href="https://example.invalid/?a=1&amp;b=2"', markup)
+            self.assertIn('&lt;script&gt;', markup)
+            self.assertNotIn('href="javascript:', markup)
+            self.assertIn('<details><summary>链接封面', markup)
+            plain = (output/'朋友圈.txt').read_text('utf8')
+            self.assertIn('https://example.invalid/?a=1&b=2', plain)
+            self.assertIn(images[0]['file'], plain)
+            self.assertEqual(stats['without_time_excluded'], 1)
+            self.assertEqual(stats['cached_images'], 3)
+            gallery = (output/'本机图片缓存.html').read_text('utf8')
+            self.assertEqual(gallery.count('<img '), 3)
+            self.assertEqual(stats['state'], 'complete')
+
+            output, stats = export_moments(session, root, include_images=False)
+            self.assertEqual((stats['moments'], stats['parse_warnings']), (4, 1))
+            self.assertFalse(list((output/'assets').iterdir()))
+            self.assertFalse((output/'本机图片缓存.html').exists())
+
+    def test_moments_reject_ambiguous_cache_candidate(self):
+        from contextlib import closing
+        with tempfile.TemporaryDirectory() as directory, closing(Session(scratch=directory)) as session:
+            session.account = Path(directory)
+            cache = session.account/'cache'/'2026-11'/'Sns'/'Img'
+            cache.mkdir(parents=True)
+            Image.new('RGB',(27,19),'green').save(cache/'item','PNG')
+            size = (cache/'item').stat().st_size
+            content = (f'<mediaList><media><type>2</type><url md5="{{}}"/>'
+                       f'<size width="27" height="19" totalSize="{size}"/></media></mediaList>')
+            moment_database(session.cache/'sns.db', [
+                (1, moment_xml(1700000000, content=content.format('a'*32))),
+                (2, moment_xml(1700000001, content=content.format('b'*32))),
+            ])
+            _, stats = export_moments(session, directory, end=1700000001)
+            self.assertEqual((stats['moments'], stats['candidate_images'], stats['unavailable_images']), (1, 0, 1))
+
+    def test_moments_cancellation_marks_output_incomplete(self):
+        from contextlib import closing
+        with tempfile.TemporaryDirectory() as directory, closing(Session(scratch=directory)) as session:
+            moment_database(session.cache/'sns.db', [(1, moment_xml(1700000000))])
+            session.cancel.set()
+            with self.assertRaises(InterruptedError):
+                export_moments(session, directory, include_images=False)
+            report = next(Path(directory).glob('*.未完成/导出统计.json'))
+            self.assertEqual(json.loads(report.read_text('utf8'))['reason'], 'cancelled')
+
     def test_time_ranges_and_shortcuts(self):
         stamp = lambda day, hour=0: dt.datetime(2026, 11, day, hour).timestamp()
         self.assertEqual(parse_time_range(' 2026-11-09-1 ', '2026-11-09-2'), (stamp(9,1),stamp(9,2)))

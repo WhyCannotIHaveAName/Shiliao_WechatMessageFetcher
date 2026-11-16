@@ -169,23 +169,13 @@ def decode_dat(data, aes_key=None, xor_key=None):
             return out
     raise ValueError("暂不支持此图片格式")
 
-class LocalImages:
-    def __init__(self, session, chats):
+class ImageDecoder:
+    def __init__(self, session, xor=None):
         self.session = session
-        self.files = {}
-        for chat in chats:
-            session.check()
-            root = session.account / "msg" / "attach" / chat["id"]
-            for p in root.rglob("*") if root.exists() else []:
-                session.check()
-                if p.is_file() and p.suffix.lower() in (".dat", ".jpg", ".png", ".gif", ".webp"):
-                    self.files.setdefault((chat["id"], p.name.lower()), []).append(p)
-        thumbnails = [p for (_, name), paths in self.files.items() if name.endswith("_t.dat") for p in paths]
-        self.xor = xor_guess(thumbnails)
+        self.xor = xor
         self.key = session.image_key
         self.local_keys = None
         self.scan_attempted = False
-        self.saved = {}
 
     def _ensure_key(self, data):
         if data[:6] != V2:
@@ -214,6 +204,25 @@ class LocalImages:
         self.session.progress('正在读取图片解码信息，最多等待 120 秒。超时后继续导出消息。')
         self.key = find_image_key(data[15:31], self.session.check, self.session.progress)
         self.session.image_key = self.key
+
+    def decode(self, data):
+        self._ensure_key(data)
+        return decode_dat(data, self.key, self.xor)
+
+
+class LocalImages(ImageDecoder):
+    def __init__(self, session, chats):
+        self.files = {}
+        for chat in chats:
+            session.check()
+            root = session.account / "msg" / "attach" / chat["id"]
+            for p in root.rglob("*") if root.exists() else []:
+                session.check()
+                if p.is_file() and p.suffix.lower() in (".dat", ".jpg", ".png", ".gif", ".webp"):
+                    self.files.setdefault((chat["id"], p.name.lower()), []).append(p)
+        thumbnails = [p for (_, name), paths in self.files.items() if name.endswith("_t.dat") for p in paths]
+        super().__init__(session, xor_guess(thumbnails))
+        self.saved = {}
 
     def attach(self, chat, message, destination):
         body = message["raw_content"]
@@ -253,8 +262,7 @@ class LocalImages:
                 return dict(self.saved[source])
             try:
                 data = source.read_bytes()
-                self._ensure_key(data)
-                decoded = decode_dat(data, self.key, self.xor)
+                decoded = self.decode(data)
                 ext = kind(decoded)
                 if ext != 'wxgf' and not valid_image(decoded):
                     raise ValueError('图片内容不完整')

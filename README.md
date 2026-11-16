@@ -1,6 +1,6 @@
-# 拾聊 2.6 Windows 版
+# 拾聊 2.6.1 Windows 版
 
-2.6 版新增本机朋友圈导出。解压整个压缩包，然后打开 `Shiliao-2.6\Shiliao-2.6.exe`。上一版可从 [GitHub Releases 下载](https://github.com/WhyCannotIHaveAName/Shiliao_WechatMessageFetcher/releases/download/v2.5/Shiliao-2.5-Windows.zip)。
+2.6.1 版将聊天记录和朋友圈放在两个工作区，各自读取数据、筛选和导出。解压整个压缩包，然后打开 `Shiliao-2.6.1\Shiliao-2.6.1.exe`。2.5 版可从 [GitHub Releases 下载](https://github.com/WhyCannotIHaveAName/Shiliao_WechatMessageFetcher/releases/download/v2.5/Shiliao-2.5-Windows.zip)。
 
 2.2 版支持从本机微信缓存识别图片密钥，适用于迁移到其他盘的账号目录。已用真实迁移目录验证图片导出，详细范围见 `TESTING.md`。
 
@@ -9,10 +9,12 @@
 ## 使用
 
 1. 解压整个压缩包，保留可执行文件旁的 `_internal` 文件夹。
-2. 保持电脑微信已登录，双击 `Shiliao-2.6.exe`。
-3. 点击“读取本地记录”。自动查找失败时，选择微信设置中显示的 `xwechat_files` 数据目录或其中的账号文件夹。多个账号时可选择具体账号目录。
+2. 保持电脑微信已登录，双击 `Shiliao-2.6.1.exe`，在侧栏选择「聊天记录」。
+3. 点击「读取聊天记录」。自动查找失败时，选择微信设置中显示的 `xwechat_files` 数据目录或其中的账号文件夹。多个账号时可选择具体账号目录。
 4. 点击列表中的会话勾选，可搜索、全选当前结果。可手填时间范围，也可点击“今天”“昨天”“一周前至今”“全部时间”。日期格式 `YYYY-MM-DD`；小时格式 `YYYY-MM-DD-H`，例如 `2026-11-09-1` 表示当天 1:00。小时为 0–23，留空不限。开始时间包含在内，结束整点不包含；仅填结束日期时包含全天。
 5. 选择保存位置，点击“导出所选会话”。完成后点击“打开导出文件夹”，打开其中的 `打开聊天记录.html`。
+
+小窗口内可用滚轮或右侧滚动条查看导出设置。导出、取消和打开文件夹按钮固定在底栏。
 
 每个会话都有 HTML、UTF-8 TXT、JSON 和图片 assets 文件夹。复制导出结果时请复制整个文件夹。JSON 保留原始消息内容、类型码、发送者账号、显示名和时间戳；HTML 中非文本消息可展开“原始消息信息”。群聊按每条消息的发信方映射显示，无法确定时保留账号或显示未知发送者。
 
@@ -22,13 +24,13 @@
 
 ## 导出朋友圈
 
-1. 登录电脑微信后，在拾聊点「读取本地记录」。界面显示本账号的本地朋友圈条数。若提示暂不可读，可以在电脑微信打开朋友圈后重新读取。
-2. 选好时间范围与保存位置，点击「导出朋友圈」。该按钮直接读取所选账号的本地时间线，无需勾选会话。
+1. 登录电脑微信后，在拾聊侧栏选择「朋友圈」，点「读取朋友圈」。界面显示本账号的本地朋友圈条数。若提示暂不可读，可以在电脑微信打开朋友圈后重新读取。
+2. 在关键词框按正文、发布者或分享链接搜索。预览显示最新 200 条匹配结果。选好时间范围与保存位置，点击「导出朋友圈」，即可导出同时符合关键词和时间条件的全部结果。
 3. 点「打开导出文件夹」，打开 `朋友圈.html`。同目录有 `朋友圈.txt`、`朋友圈.json`、`导出统计.json` 和 `assets`。结果按发布时间从新到旧排列，保留发布者、文字、分享链接及本地可匹配图片。JSON 同时保留 Unix 时间戳。时间范围启用时，发布时间未知的记录会计入排除统计。
 
 打开「导出本地图片」时，拾聊优先用图片内容的 MD5 校验。原图哈希不匹配时，仅在宽、高和字节数相等且匹配唯一的情况下保存候选图。候选图在 HTML 中折叠显示，需对照微信核对。未匹配的图片会在动态下标明。缺少原图很常见，微信本地可能只保留缩略图或重新编码后的版本。
 
-勾选「附带整个朋友圈图片缓存（所有日期）」可输出 `本机图片缓存.html` 和所有可解码的本机朋友圈图片缓存。此选项独立于动态的日期范围，图片来自本地缓存，按内容去重。缓存文件没有可靠的动态编号或发布时间。朋友圈内容与图片的读取均在本机完成。HTML 只在你主动点击分享链接时打开外部页面。
+勾选「附带全部图片缓存（所有日期）」可输出 `本机图片缓存.html` 和所有可解码的本机朋友圈图片缓存。此选项独立于动态的关键词和日期范围，图片来自本地缓存，按内容去重。缓存文件没有可靠的动态编号或发布时间。朋友圈内容与图片的读取均在本机完成。HTML 只在你主动点击分享链接时打开外部页面。
 
 ## 图片与其他类型
 
@@ -57,7 +59,7 @@ python -m venv .venv
 $env:TCL_LIBRARY='vendor/tcl8.6'
 $env:TK_LIBRARY='vendor/tk8.6'
 .\.venv\Scripts\python -m PyInstaller --noconfirm Shiliao.spec
-$exe = Resolve-Path .\dist\Shiliao-2.6\Shiliao-2.6.exe
+$exe = Resolve-Path .\dist\Shiliao-2.6.1\Shiliao-2.6.1.exe
 $report = Join-Path (Get-Location) 'packaged-test.json'
 $p = Start-Process $exe -ArgumentList @('--self-test', ('"' + $report + '"')) -WindowStyle Hidden -PassThru -Wait
 if ($p.ExitCode -ne 0 -or !(Get-Content -Raw $report | ConvertFrom-Json).passed) { throw 'Self-test failed' }

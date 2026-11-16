@@ -87,8 +87,26 @@ def positive_integer(value):
         return None
 
 
-def read_moments(session, start, end):
-    posts, unknown_outside_filter = [], 0
+class MomentTimeline:
+    def __init__(self, posts, unique_signatures):
+        self.posts = posts
+        self.unique_signatures = unique_signatures
+        self.search_index = []
+        for post in posts:
+            fields = [post['author'], post['username'], post['text']]
+            for link in post['links']:
+                fields.extend((link['title'], link['description'], link['url']))
+            self.search_index.append('\n'.join(fields).casefold())
+
+    def search(self, keyword):
+        term = keyword.strip().casefold()
+        if not term:
+            return self.posts
+        return [post for post, content in zip(self.posts, self.search_index) if term in content]
+
+
+def load_moments(session):
+    posts = []
     signatures = defaultdict(set)
     with closing(readonly(session.cache / 'sns.db')) as con:
         for row in con.execute('SELECT tid, user_name, content FROM SnsTimeLine ORDER BY tid DESC'):
@@ -98,16 +116,24 @@ def read_moments(session, start, end):
                 signature = image_signature(image)
                 if all(signature):
                     signatures[signature].add(image['md5'] or (post['id'], index))
-            timestamp = post['timestamp']
-            if timestamp is None and (start is not None or end is not None):
-                unknown_outside_filter += 1
-                continue
-            if (start is not None and timestamp < start) or (end is not None and timestamp >= end):
-                continue
             posts.append(post)
     posts.sort(key=lambda post: post['timestamp'] or 0, reverse=True)
     unique = {signature for signature, identities in signatures.items() if len(identities) == 1}
-    return posts, unknown_outside_filter, unique
+    return MomentTimeline(posts, unique)
+
+
+def filter_dates(session, posts, start, end):
+    if start is None and end is None:
+        return posts, 0
+    filtered, unknown = [], 0
+    for post in posts:
+        session.check()
+        stamp = post['timestamp']
+        if stamp is None:
+            unknown += 1
+        elif (start is None or stamp >= start) and (end is None or stamp < end):
+            filtered.append(post)
+    return filtered, unknown
 
 
 def image_signature(image):
@@ -259,7 +285,8 @@ def write_post(post, markup, plain):
     plain.write('\n')
 
 
-def export_moments(session, directory, start=None, end=None, include_images=True, include_cache=False):
+def export_moments(session, directory, start=None, end=None, include_images=True, include_cache=False,
+                   *, timeline=None, keyword=''):
     target = Path(directory) / ('拾聊朋友圈-' + dt.datetime.now().strftime('%Y%m%d-%H%M%S')
                                 + '-' + uuid.uuid4().hex[:6])
     staging = target.with_name(target.name + '.未完成')
@@ -269,15 +296,18 @@ def export_moments(session, directory, start=None, end=None, include_images=True
                'candidate_images': 0, 'unavailable_images': 0, 'parse_warnings': 0,
                'without_time_excluded': 0, 'include_images': include_images,
                'include_cache': include_cache, 'cached_images': 0,
-               'start': start, 'end_exclusive': end}
+               'start': start, 'end_exclusive': end, 'keyword': keyword}
     try:
         session.progress('正在整理本地朋友圈…')
-        posts, summary['without_time_excluded'], unique = read_moments(session, start, end)
+        if timeline is None:
+            timeline = load_moments(session)
+        posts, summary['without_time_excluded'] = filter_dates(session, timeline.search(keyword), start, end)
         assets = staging / 'assets'
         assets.mkdir()
         images = None
         if include_images or include_cache:
-            images = LocalMomentImages(session, posts if include_images else [], unique, assets, include_cache)
+            images = LocalMomentImages(session, posts if include_images else [],
+                                       timeline.unique_signatures, assets, include_cache)
         if include_cache:
             images.write_gallery(staging)
             summary['cached_images'] = len(images.gallery)
@@ -291,10 +321,11 @@ def export_moments(session, directory, start=None, end=None, include_images=True
                              f"（{summary['cached_images']:,} 张）</a></p>")
             records.write('[\n')
             try:
-                for index, post in enumerate(posts):
+                for index, source in enumerate(posts):
                     session.check()
                     if index and index % 200 == 0:
                         session.progress(f'正在导出朋友圈 · {index:,}/{len(posts):,} 条')
+                    post = dict(source, images=[dict(image) for image in source['images']])
                     for image in post['images']:
                         if not include_images:
                             image.update(status='未启用图片导出', code='disabled')

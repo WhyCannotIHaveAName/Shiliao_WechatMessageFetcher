@@ -12,7 +12,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from database import Session
 from exporter import export_chats, parse_message
 from media import decode_dat, V2, wxgf_preview, valid_image, key_signature
-from moments import export_moments
+from moments import export_moments, load_moments
 from snapshot import snapshot, committed_wal, wal_checksum
 from time_filter import parse_time_range, quick_range
 
@@ -30,35 +30,139 @@ def moment_database(path, rows):
     con.close()
 
 
-def check_moments_button(window):
+def check_desktop(window):
     import time
+    chat, moments = window.pages['chat'], window.pages['moments']
+    window.geometry('660x370')
+    window.update()
+
+    def check_footer(page):
+        for button in (page.export_button, page.cancel_button, page.open_button):
+            assert button.winfo_ismapped()
+            assert button.winfo_width() >= button.winfo_reqwidth()
+            assert button.winfo_rootx() + button.winfo_width() <= window.winfo_rootx() + window.winfo_width()
+            assert button.winfo_rooty() + button.winfo_height() <= window.winfo_rooty() + window.winfo_height()
+        assert page.body.canvas.winfo_height() > 0
+
+    check_footer(chat)
+    chat.chats = {'a':{'id':'a','name':'测试会话','username':'test','count':302,'last':1700000000}}
+    chat.render_results()
+    chat.select_visible()
+    chat.search.set('不存在')
+    chat.render_results()
+    assert not chat.tree.get_children() and chat.selected == {'a'}
+    for preset, button in chat.time_buttons.items():
+        button.invoke()
+        assert (chat.start.get(), chat.end.get()) == quick_range(preset)
+    chat.start.set('2026-11-16')
+    y = chat.export_button.winfo_rooty()
+    chat.search_entry.event_generate('<MouseWheel>', delta=-120)
+    window.update()
+    assert chat.body.canvas.yview()[0] > 0 and chat.export_button.winfo_rooty() == y
+    chat.body.canvas.yview_moveto(1)
+    window.update()
+    assert chat.output_entry.winfo_rooty() + chat.output_entry.winfo_height() \
+        <= chat.body.canvas.winfo_rooty() + chat.body.canvas.winfo_height()
+
+    window.nav['moments'].invoke()
+    window.update()
+    check_footer(moments)
+    assert not chat.winfo_ismapped() and moments.start.get() == ''
     with tempfile.TemporaryDirectory() as directory:
         session = Session(scratch=directory)
         try:
-            moment_database(session.cache/'sns.db', [(1, moment_xml(1700000000,'按钮验收'))])
-            session.moment_count = 1
-            session.moment_status = '本机朋友圈 1 条（筛选日期前）'
-            window.session = session
-            window.events.put(('connected', ([], session.moment_status)))
-            window.events.put(('done', None))
-            window.poll()
-            assert str(window.moment_button['state']) == 'normal'
-            window.output_dir.set(directory)
-            window.pictures.set(False)
-            window.moment_button.invoke()
+            moment_database(session.cache/'sns.db', [(1, moment_xml(1700000000, '按钮验收')),
+                                                     (2, moment_xml(1700000001, '另一个动态'))])
+            session.moment_count = 2
+            session.moment_status = '本机朋友圈 2 条（筛选日期前）'
+            moments.set_session((session, load_moments(session), ''))
+            moments.search.set('验收')
+            moments.render_results()
+            assert len(moments.tree.get_children()) == 1
+            assert moments.export_button.instate(['!disabled'])
+            moments.root_dir.set(directory)
+            assert moments.export_button.instate(['disabled'])
+            moments.root_dir.set('')
+            moments.output_dir.set(directory)
+            moments.pictures.set(False)
+            moments.export_button.invoke()
             deadline = time.monotonic() + 5
-            while window.busy() and time.monotonic() < deadline:
+            while window.busy and time.monotonic() < deadline:
                 window.update()
                 time.sleep(0.02)
-            assert not window.busy()
-            assert '1 条朋友圈' in window.status.get()
-            assert (window.last_output/'朋友圈.html').is_file()
+            assert not window.busy
+            assert '1 条朋友圈' in moments.status.get()
+            assert (moments.last_output/'朋友圈.html').is_file()
+            window.state('zoomed')
+            window.update()
+            check_footer(moments)
+            window.nav['chat'].invoke()
+            window.update()
+            check_footer(chat)
+            assert chat.start.get() == '2026-11-16' and chat.search.get() == '不存在'
         finally:
             session.close()
-            window.session = None
+            moments.session = None
 
 
 class ExportTests(unittest.TestCase):
+    def test_workspace_database_scopes(self):
+        from contextlib import closing
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            storage = root/'account'/'db_storage'
+            for name in ('contact', 'sns', 'message'):
+                (storage/name).mkdir(parents=True)
+            moment_database(storage/'sns'/'sns.db', [(1, moment_xml(1700000000))])
+            with closing(sqlite3.connect(storage/'contact'/'contact.db')) as con, con:
+                con.execute('CREATE TABLE contact(username, nick_name, remark)')
+                con.execute("INSERT INTO contact VALUES ('alice', 'Alice', '发布者')")
+            table = 'Msg_' + hashlib.md5(b'alice').hexdigest()
+            with closing(sqlite3.connect(storage/'message'/'message_0.db')) as con, con:
+                con.execute(f'CREATE TABLE {table}(create_time)')
+                con.execute(f'INSERT INTO {table} VALUES (1700000000)')
+
+            def copy_plain(source, destination, material, check):
+                return snapshot(source, destination, None, check)
+
+            with (patch('database.native.MemoryKeys.candidates', side_effect=lambda: {(b'fixture', None)}),
+                  patch('database.native._verify_enc_key', return_value=True) as verify,
+                  patch('database.snapshot', side_effect=copy_plain) as copy):
+                with closing(Session(scratch=root)) as chat:
+                    self.assertEqual(chat.connect(storage.parent, scope='chat'), 1)
+                    self.assertEqual({call.args[0].name for call in copy.call_args_list},
+                                     {'contact.db', 'message_0.db'})
+                    self.assertEqual(verify.call_count, 2)
+                    self.assertFalse((chat.cache/'sns.db').exists())
+                copy.reset_mock()
+                verify.reset_mock()
+                with closing(Session(scratch=root)) as moments:
+                    self.assertEqual(moments.connect(storage.parent, scope='moments'), 1)
+                    self.assertEqual({call.args[0].name for call in copy.call_args_list},
+                                     {'contact.db', 'sns.db'})
+                    self.assertEqual(verify.call_count, 2)
+                    self.assertFalse(moments.shards)
+                    self.assertEqual(load_moments(moments).posts[0]['author'], '发布者')
+
+    def test_moments_keyword_reuses_timeline(self):
+        from contextlib import closing
+        with tempfile.TemporaryDirectory() as directory, closing(Session(scratch=directory)) as session:
+            path = session.cache/'sns.db'
+            moment_database(path, [
+                (1, moment_xml(1700000000, '【TEST】')),
+                (2, moment_xml(1700000001, content='<contentUrl>https://example.invalid/TeSt</contentUrl>')),
+                (3, moment_xml(1700000002, '无关动态')),
+            ])
+            timeline = load_moments(session)
+            path.unlink()
+            self.assertEqual([post['id'] for post in timeline.search('  test  ')], ['2', '1'])
+            output, stats = export_moments(session, directory, start=1700000001, include_images=False,
+                                           timeline=timeline, keyword='TEST')
+            self.assertEqual(stats['moments'], 1)
+            post = json.loads((output/'朋友圈.json').read_text('utf8'))[0]
+            self.assertEqual(post['id'], '2')
+
     def test_moments_export_formats_and_image_cache(self):
         from contextlib import closing
         from zstandard import ZstdCompressor

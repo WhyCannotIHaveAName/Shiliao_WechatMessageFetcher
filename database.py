@@ -47,7 +47,9 @@ class Session:
         if self.cancel.is_set():
             raise InterruptedError("已取消")
 
-    def connect(self, root=None, account=None):
+    def connect(self, root=None, account=None, *, scope='all'):
+        if scope not in ('chat', 'moments', 'all'):
+            raise ValueError('未知的读取范围')
         root = root or native.auto_detect_db_dir()
         if not root:
             raise RuntimeError("未找到微信数据目录。请点「选择目录」指定 xwechat_files。")
@@ -62,32 +64,42 @@ class Session:
             accounts = [p for p in accounts if p.name == account]
         if not accounts:
             raise RuntimeError("此目录下没有微信 4.x 数据库。请选择 xwechat_files 或账号目录。")
+        if scope == 'moments' and not any((acc / 'db_storage' / 'sns' / 'sns.db').is_file() for acc in accounts):
+            raise RuntimeError('所选位置没有朋友圈数据库。请在电脑微信打开朋友圈后重试。')
         candidates = native.MemoryKeys(self.cancel, self.progress).candidates()
         matches = []
         for acc in accounts:
             keys = {}
-            paths = db_files(acc)
-            sns = acc / 'db_storage' / 'sns' / 'sns.db'
-            for p in paths + ([sns] if sns.is_file() else []):
+            storage = acc / 'db_storage'
+            sns = storage / 'sns' / 'sns.db'
+            contact = storage / 'contact' / 'contact.db'
+            paths = db_files(acc) if scope != 'moments' else []
+            optional = [sns] if scope != 'chat' else []
+            if scope == 'moments':
+                optional.append(contact)
+            for p in paths + [p for p in optional if p.is_file()]:
                 self.check()
                 try:
                     with p.open("rb") as stream:
                         page = stream.read(4096)
                 except OSError:
-                    if p == sns:
+                    if p in optional:
                         continue
                     raise
                 for key, salt in candidates:
                     if native._verify_enc_key(key, page, salt):
                         keys[p] = key + (salt or b"")
                         break
-            if keys:
-                matches.append((acc, paths, sns, keys))
+            has_match = sns in keys if scope == 'moments' else bool(keys)
+            if has_match:
+                matches.append((acc, paths, sns, contact, keys))
         if len(matches) > 1:
             raise RuntimeError("检测到多个已登录账号，请选择具体账号目录后读取。")
         if not matches:
+            if scope == 'moments':
+                raise RuntimeError('朋友圈暂不可读，请在电脑微信打开朋友圈后重新读取。')
             raise RuntimeError("未能取得此账号的数据库密钥。请确认电脑微信已登录，且所选目录属于当前账号。")
-        self.account, paths, sns, keys = matches[0]
+        self.account, paths, sns, contact, keys = matches[0]
         missing = [p.name for p in paths if p not in keys]
         if missing:
             raise RuntimeError("以下数据库尚未取得密钥，读取未完成：" + "、".join(missing))
@@ -97,7 +109,19 @@ class Session:
             dst = snapshot(p, self.cache / p.name, keys[p], self.check)
             if re.fullmatch(r"message_\d+\.db", p.name):
                 self.shards.append(dst)
-        self.index_moments(sns, keys.get(sns))
+        if scope != 'chat':
+            self.index_moments(sns, keys.get(sns))
+        if scope == 'moments':
+            if keys.get(contact):
+                try:
+                    snapshot(contact, self.cache / 'contact.db', keys[contact], self.check)
+                    self.contacts = self.read_contacts()
+                except InterruptedError:
+                    raise
+                except (OSError, ValueError, RuntimeError, sqlite3.Error):
+                    # The timeline carries account names for posts with no matching contact.
+                    pass
+            return self.moment_count
         keys.clear()
         candidates.clear()
         self.index()
@@ -125,15 +149,19 @@ class Session:
             return
         self.moment_status = f'本机朋友圈 {self.moment_count:,} 条（筛选日期前）'
 
-    def index(self):
-        names, index = {}, {}
+    def read_contacts(self):
+        names = {}
         contact = self.cache / "contact.db"
         if contact.exists():
             with closing(readonly(contact)) as con:
                 for r in con.execute("SELECT username,nick_name,remark FROM contact"):
                     user, nick, remark = map(text, r)
                     names[user] = {"name": remark or nick or user, "nickname": nick or user}
-                    index[hashlib.md5(user.encode()).hexdigest()] = user
+        return names
+
+    def index(self):
+        names = self.read_contacts()
+        index = {hashlib.md5(user.encode()).hexdigest():user for user in names}
         session = self.cache / "session.db"
         if session.exists():
             with closing(readonly(session)) as con:

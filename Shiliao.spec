@@ -1,10 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_data_files
 from pathlib import Path
 import runpy
 build_name = runpy.run_path(str(Path(SPECPATH) / 'version.py'))['BUILD_NAME']
 
 datas = [('vendor/tcl8.6', '_tcl_data'), ('vendor/tk8.6', '_tk_data')]
+datas += collect_data_files('jieba', includes=['dict.txt'])
 binaries = []
 hiddenimports = []
 tmp_ret = collect_all('av')

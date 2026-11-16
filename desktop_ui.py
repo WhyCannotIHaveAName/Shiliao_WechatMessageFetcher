@@ -1,4 +1,5 @@
-"""Two independent workspaces for the Windows desktop application."""
+"""Chat, Moments, and statistics workspaces for the Windows desktop application."""
+from contextlib import closing
 import datetime as dt
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ from tkinter import filedialog, font, messagebox, ttk
 
 from database import Session
 from exporter import export_chats
+from fun_stats import chat_statistics, moments_statistics
 from moments import export_moments, load_moments
 from time_filter import parse_time_range, quick_range
 from version import VERSION
@@ -127,6 +129,7 @@ class ExportPage(ttk.Frame):
         self.end = tk.StringVar(self)
         self.pictures = tk.BooleanVar(self, value=True)
         self.include_cache = tk.BooleanVar(self, value=False)
+        self.include_comments = tk.BooleanVar(self, value=False)
         self.status = tk.StringVar(self, value=f'请登录电脑微信，然后点击「读取{self.title}」。')
         self.selection = tk.StringVar(self)
         self.preview_job = None
@@ -189,6 +192,7 @@ class ExportPage(ttk.Frame):
         if not self.is_chat:
             ttk.Checkbutton(settings, text='附带全部图片缓存（所有日期）',
                             variable=self.include_cache).pack(anchor='w')
+            ttk.Checkbutton(settings, text='导出本地评论及回复', variable=self.include_comments).pack(anchor='w')
         destination = ttk.Frame(settings, style='Card.TFrame')
         destination.pack(fill='x', pady=(5, 0))
         ttk.Label(destination, text='保存位置', style='Card.TLabel').pack(side='left', padx=(0, 8))
@@ -458,11 +462,14 @@ class ExportPage(ttk.Frame):
                 return export_chats(session, chats, directory, start, end, pictures)
         else:
             timeline, keyword, include_cache = self.timeline, self.search.get().strip(), self.include_cache.get()
+            include_comments = self.include_comments.get()
 
             def save(progress):
                 return export_moments(session, directory, start, end, pictures,
-                                      include_cache=include_cache, timeline=timeline, keyword=keyword)
-        self.app.run_task(self, save, self.finish_export, '正在准备导出…')
+                                      include_cache=include_cache, timeline=timeline, keyword=keyword,
+                                      include_comments=include_comments)
+        self.app.run_task(self, save, self.finish_export, '正在准备导出…',
+                          cancel_message='导出已取消。已写入的文件保存在「.未完成」文件夹。')
 
     def finish_export(self, result):
         self.last_output, stats = result
@@ -476,6 +483,8 @@ class ExportPage(ttk.Frame):
                            f"{stats['unavailable_images']:,} 张未匹配")
             if stats['include_cache']:
                 status += f"，本机图片缓存 {stats['cached_images']:,} 张"
+            if stats['include_comments']:
+                status += f"，评论 {stats['comments']:,} 条"
         self.status.set(status)
 
     def open_output(self):
@@ -484,6 +493,244 @@ class ExportPage(ttk.Frame):
             os.startfile(str(folder))
         else:
             self.status.set('完成导出后，可在这里打开保存位置。')
+
+
+class RankBars(tk.Canvas):
+    """A resize-aware ranking with exact counts and a shared zero baseline."""
+    def __init__(self, parent, rows, color=ACCENT):
+        super().__init__(parent, background=PANEL, highlightthickness=0, width=200)
+        self.rows = rows
+        self.color = color
+        self.label_font = font.Font(self, family='Microsoft YaHei UI', size=10)
+        self.value_font = font.Font(self, family='Microsoft YaHei UI', size=10, weight='bold')
+        self.line_height = self.label_font.metrics('linespace')
+        self.row_height = self.line_height + 16
+        self.configure(height=self.row_height * len(rows) + 5)
+        self.bind('<Configure>', self.draw)
+
+    def draw(self, event):
+        self.delete('all')
+        if not self.rows:
+            return
+        peak = max(value for _, value in self.rows)
+        right = max(16, event.width - 7)
+        for index, (label, value) in enumerate(self.rows):
+            y = index * self.row_height + 2
+            count = f'{value:,}'
+            text_limit = max(12, right - self.value_font.measure(count) - 21)
+            if self.label_font.measure(label) > text_limit:
+                while label and self.label_font.measure(label + '…') > text_limit:
+                    label = label[:-1]
+                label += '…'
+            self.create_text(5, y, text=label, font=self.label_font, fill=INK, anchor='nw')
+            self.create_text(right, y, text=count, font=self.value_font, fill=self.color, anchor='ne')
+            baseline = y + self.line_height + 7
+            self.create_line(6, baseline, right, baseline, fill='#ede6da', width=5, capstyle='round')
+            end = 6 + max(1, round((right - 6) * value / max(1, peak)))
+            self.create_line(6, baseline, end, baseline, fill=self.color, width=5, capstyle='round')
+
+
+class StatsPage(ttk.Frame):
+    title = '趣味统计'
+    SCOPES = {'聊天和朋友圈': 'all', '只统计聊天': 'chat', '只统计朋友圈': 'moments'}
+    TERMS = {'大家常用汉字': 'chars', '大家常用词': 'words', '我常用的汉字': 'own_chars',
+             '我常用的词': 'own_words', '我常用的微信表情': 'own_emojis'}
+    card = staticmethod(ExportPage.card)
+    wrap_label = staticmethod(ExportPage.wrap_label)
+
+    def __init__(self, parent, app):
+        super().__init__(parent)
+        self.app = app
+        self.root_dir = tk.StringVar(self)
+        self.start = tk.StringVar(self)
+        self.end = tk.StringVar(self)
+        self.scope = tk.StringVar(self, value='聊天和朋友圈')
+        self.include_words = tk.BooleanVar(self, value=True)
+        self.status = tk.StringVar(self, value='登录电脑微信后，选择范围并生成统计。')
+        self.term_view = tk.StringVar(self, value='大家常用汉字')
+        self.body = ScrollBody(self)
+        self.body.grid(row=0, column=0, sticky='nsew')
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+        area = self.body.content
+        ttk.Label(area, text=self.title, style='Title.TLabel').pack(anchor='w')
+        self.wrap_label(area, text='看看这一段时间，你和谁聊得最多，又常说些什么。',
+                        style='Subtitle.TLabel', pady=(0, 11))
+        options = self.card(area, '统计范围')
+        directory = ttk.Frame(options, style='Card.TFrame')
+        directory.pack(fill='x', pady=(0, 6))
+        ttk.Label(directory, text='微信目录', style='Card.TLabel').pack(side='left', padx=(0, 8))
+        self.source_entry = ttk.Entry(directory, textvariable=self.root_dir, width=1)
+        self.source_entry.pack(side='left', expand=True, fill='x')
+        self.source_button = ttk.Button(directory, text='选择目录', command=self.choose_source)
+        self.source_button.pack(side='left', padx=(8, 0))
+        self.wrap_label(options, text='留空自动查找当前登录账号。', style='Hint.TLabel', pady=(0, 8))
+        dates = ttk.Frame(options, style='Card.TFrame')
+        dates.pack(fill='x')
+        dates.columnconfigure((1, 3), weight=1, uniform='date')
+        ttk.Label(dates, text='时间范围', style='Card.TLabel').grid(row=0, column=0, padx=(0, 8))
+        ttk.Entry(dates, textvariable=self.start, width=1).grid(row=0, column=1, sticky='ew')
+        ttk.Label(dates, text='至', style='Card.TLabel').grid(row=0, column=2, padx=6)
+        ttk.Entry(dates, textvariable=self.end, width=1).grid(row=0, column=3, sticky='ew')
+        self.wrap_label(options, text='格式 YYYY-MM-DD 或 YYYY-MM-DD-H，留空统计全部时间。',
+                        style='Hint.TLabel', pady=(4, 6))
+        presets = ttk.Frame(options, style='Card.TFrame')
+        presets.pack(fill='x', pady=(0, 7))
+        for index, label in enumerate(('今年', '近 30 天', '全部时间')):
+            ttk.Button(presets, text=label, command=lambda index=index: self.preset(index)).grid(
+                row=0, column=index, sticky='w', padx=(0, 6))
+        ttk.Label(options, text='数据来源', style='Card.TLabel').pack(anchor='w', pady=(0, 4))
+        self.scope_picker = ttk.Combobox(options, textvariable=self.scope, values=tuple(self.SCOPES),
+                                         state='readonly', width=15)
+        self.scope_picker.pack(anchor='w')
+        self.words_toggle = ttk.Checkbutton(options, text='统计聊天字词和表情', variable=self.include_words)
+        self.words_toggle.pack(anchor='w', pady=(4, 0))
+        self.scope_picker.bind('<<ComboboxSelected>>', lambda _: self.refresh_buttons())
+
+        self.result_area = ttk.Frame(area)
+        self.result_area.pack(fill='x')
+        self.wrap_label(self.card(self.result_area, '统计结果'),
+                        text='生成后会显示年度人物、聊天和朋友圈排行。', style='Hint.TLabel', pady=(0, 2))
+
+        footer = ttk.Frame(self, style='Card.TFrame', padding=(20, 7, 16, 7))
+        footer.grid(row=1, column=0, sticky='ew')
+        footer.columnconfigure(2, weight=1)
+        self.progressbar = ttk.Progressbar(footer, mode='indeterminate')
+        self.progressbar.grid(row=0, column=0, columnspan=3, sticky='ew', pady=(0, 3))
+        status = ttk.Label(footer, textvariable=self.status, style='Status.TLabel')
+        status.grid(row=1, column=0, columnspan=3, sticky='ew', pady=(0, 5))
+        footer.bind('<Configure>', lambda event: status.configure(wraplength=max(100, event.width - 36)))
+        self.run_button = ttk.Button(footer, text='生成统计', style='Accent.TButton', command=self.run)
+        self.run_button.grid(row=2, column=0, sticky='w')
+        self.cancel_button = ttk.Button(footer, text='取消任务', command=app.cancel.set)
+        self.cancel_button.grid(row=2, column=1, sticky='w', padx=8)
+        self.refresh_buttons()
+
+    def choose_source(self):
+        path = filedialog.askdirectory(parent=self.app, title='选择微信数据目录')
+        if path:
+            self.root_dir.set(path)
+
+    def preset(self, index):
+        today = dt.date.today()
+        if index == 2:
+            self.start.set('')
+            self.end.set('')
+        else:
+            start = today.replace(month=1, day=1) if index == 0 else today - dt.timedelta(days=29)
+            self.start.set(start.isoformat())
+            self.end.set(today.isoformat())
+
+    def refresh_buttons(self):
+        busy = self.app.busy
+        for button in (self.run_button, self.source_button, self.source_entry):
+            button.state(['disabled' if busy else '!disabled'])
+        self.words_toggle.state(['disabled' if self.scope.get() == '只统计朋友圈' else '!disabled'])
+        self.cancel_button.state(['!disabled' if self.app.task_page is self else 'disabled'])
+
+    def run(self):
+        try:
+            start, end = parse_time_range(self.start.get(), self.end.get())
+        except ValueError as error:
+            messagebox.showerror('时间范围', str(error), parent=self.app)
+            return
+        scope = self.SCOPES[self.scope.get()]
+        root = self.root_dir.get().strip() or None
+        include_words = self.include_words.get()
+        periods = self.start.get().strip(), self.end.get().strip()
+
+        def calculate(progress):
+            with closing(Session(progress=progress, cancel=self.app.cancel)) as session:
+                session.connect(root, scope=scope)
+                result = {'periods': periods}
+                if scope != 'moments':
+                    progress('正在统计私聊往来和聊天文本…')
+                    result['chat'] = chat_statistics(session, start, end, include_words=include_words)
+                if scope != 'chat':
+                    result['moments'] = moments_statistics(session, start, end)
+                session.check()
+                return result
+
+        self.app.run_task(self, calculate, self.show_report, '正在读取统计所需的本机记录…')
+
+    def chart(self, title, subtitle, rows, *, color=ACCENT, empty='这个范围暂无可显示的数据。'):
+        card = self.card(self.result_area, title)
+        self.wrap_label(card, text=subtitle, style='Hint.TLabel', pady=(0, 7))
+        self.draw_rank(card, rows, empty, color)
+        return card
+
+    def draw_rank(self, parent, rows, empty, color):
+        if rows:
+            RankBars(parent, rows, color).pack(fill='x')
+        else:
+            self.wrap_label(parent, text=empty, style='Card.TLabel', pady=(1, 5))
+
+    def show_report(self, result):
+        self.report = result
+        for widget in self.result_area.winfo_children():
+            widget.destroy()
+        start, end = result['periods']
+        chat, moments = result.get('chat'), result.get('moments')
+        period = '全部时间' if not (start or end) else f'{start or "不限起点"}  至  {end or "不限终点"}'
+        summary = []
+        if chat is not None:
+            summary.append(f"{chat['messages']:,} 条聊天消息")
+        if moments is not None:
+            summary.append(f"{moments['count']:,} 条朋友圈")
+        overview = self.card(self.result_area, '统计结果')
+        self.wrap_label(overview, text=period, style='Hint.TLabel', pady=(0, 4))
+        self.wrap_label(overview, text='  ·  '.join(summary), style='Section.TLabel', pady=(0, 3))
+
+        if chat is not None:
+            yearly = []
+            for item in chat['annual']:
+                leaders = '、'.join(item['leaders'])
+                if item['tied'] > len(item['leaders']):
+                    leaders += f" 等 {item['tied']} 人"
+                if item['tied'] > 1:
+                    leaders += '（并列）'
+                yearly.append((f"{item['year']}  ·  {leaders}", item['count']))
+            self.chart('年度人物', '每个自然年与你私聊往来最多的人，按所选时间统计。', yearly)
+            self.chart('私聊消息排行', '同一时间段内的双向私聊记录数。', chat['private_rank'])
+            if chat['include_words']:
+                card = self.card(self.result_area, '聊天里的常用字词与表情')
+                note = f"统计了 {chat['text_messages']:,} 条聊天文本"
+                if chat['owner']:
+                    note += f"，其中本人 {chat['own_text_messages']:,} 条"
+                if chat['skipped_text']:
+                    note += f"，{chat['skipped_text']:,} 条正文无法解码"
+                self.wrap_label(card, text=note + '。', style='Hint.TLabel', pady=(0, 6))
+                selector = ttk.Combobox(card, textvariable=self.term_view, values=tuple(self.TERMS),
+                                        state='readonly', width=17)
+                selector.pack(anchor='w', pady=(0, 4))
+                self.term_chart = ttk.Frame(card, style='Card.TFrame')
+                self.term_chart.pack(fill='x')
+                selector.bind('<<ComboboxSelected>>', lambda _: self.show_terms())
+                self.show_terms()
+        if moments is not None:
+            subtitle = f"共 {moments['authors']:,} 位发布者，按同一时间段内的发帖条数比较。"
+            if moments.get('unknown_time'):
+                subtitle += f" {moments['unknown_time']:,} 条发布时间未知，未计入。"
+            self.chart('朋友圈发帖排行', subtitle, moments['rank'], color='#567661',
+                       empty=moments['status'] or '这个范围暂无朋友圈动态。')
+        self.status.set('统计完成 · ' + '，'.join(summary))
+        self.after_idle(self.focus_report)
+
+    def show_terms(self):
+        for widget in self.term_chart.winfo_children():
+            widget.destroy()
+        chat = self.report['chat']
+        category = self.TERMS[self.term_view.get()]
+        unknown = category.startswith('own_') and not chat['owner']
+        self.draw_rank(self.term_chart, chat[category],
+                       '无法从账号目录和发送者索引确认本人身份。' if unknown else '这组暂无匹配的文本或表情。',
+                       '#5c7180')
+
+    def focus_report(self):
+        if self.winfo_ismapped():
+            self.body.update_region()
+            offset = self.result_area.winfo_rooty() - self.body.content.winfo_rooty()
+            self.body.canvas.yview_moveto(offset / max(1, self.body.content.winfo_height()))
 
 
 class App(tk.Tk):
@@ -517,8 +764,8 @@ class App(tk.Tk):
 
         self.pages = {}
         self.nav = {}
-        for scope in ('chat', 'moments'):
-            page = ExportPage(stage, self, scope)
+        for scope in ('chat', 'moments', 'stats'):
+            page = StatsPage(stage, self) if scope == 'stats' else ExportPage(stage, self, scope)
             self.pages[scope] = page
             page.grid(row=0, column=0, sticky='nsew')
             page.grid_remove()
@@ -554,7 +801,7 @@ class App(tk.Tk):
     def scroll_to_focus(self, event):
         self.page.body.show_focused(event.widget)
 
-    def run_task(self, page, work, complete, status):
+    def run_task(self, page, work, complete, status, *, cancel_message='任务已取消。'):
         if self.busy or self.closing:
             return
         self.cancel.clear()
@@ -569,7 +816,7 @@ class App(tk.Tk):
             try:
                 self.events.put(('complete', work(progress)))
             except InterruptedError:
-                self.events.put(('status', '任务已取消。未完成的导出保存在「.未完成」文件夹。'))
+                self.events.put(('status', cancel_message))
             except Exception as exc:
                 self.events.put(('error', str(exc)))
             finally:
@@ -605,8 +852,9 @@ class App(tk.Tk):
             pass
         if self.closing and not self.busy:
             for page in self.pages.values():
-                if page.session is not None:
-                    page.session.close()
+                session = getattr(page, 'session', None)
+                if session is not None:
+                    session.close()
             self.destroy()
             return
         self.after(60, self.poll)

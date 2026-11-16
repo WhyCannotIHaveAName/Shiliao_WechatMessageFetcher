@@ -14,19 +14,20 @@ if release.resolve().parent.parent != root or not (release/(BUILD_NAME+'.exe')).
     raise ValueError('Expected the versioned executable in a local build directory')
 source=release/'source'
 source.mkdir(exist_ok=True)
-files=['app.py','desktop_ui.py','database.py','exporter.py','moments.py','media.py','native.py','snapshot.py','version.py','time_filter.py','Shiliao.spec','package_release.py','PYTHON-LICENSE.txt',
+files=['app.py','desktop_ui.py','database.py','exporter.py','moments.py','moment_comments.py','fun_stats.py','media.py','native.py','snapshot.py','version.py','time_filter.py','Shiliao.spec','package_release.py','PYTHON-LICENSE.txt',
        'offline_guard.py','test_export.py','fetch_tk_resources.py','requirements.txt',
-       'README.md','NOTICE.txt','LICENSE-Apache-2.0.txt','TESTING.md']
+       'README.md','NOTICE.txt','LICENSE-Apache-2.0.txt','JIEBA-LICENSE.txt','TESTING.md']
 for name in files:
     shutil.copyfile(root/name,source/name)
 for name in ['README.md','NOTICE.txt','LICENSE-Apache-2.0.txt','TESTING.md','packaged-test.json']:
     shutil.copyfile(root/name,release/name)
 licenses=release/'third-party-licenses'
 licenses.mkdir(exist_ok=True)
+shutil.copyfile(root/'JIEBA-LICENSE.txt',licenses/'JIEBA-LICENSE.txt')
 shutil.copyfile(root/'PYTHON-LICENSE.txt',licenses/'PYTHON-LICENSE.txt')
 for name in ('tcl','tk'):
     shutil.copyfile(root/'vendor'/(name+'-license.terms'),licenses/(name+'-license.terms'))
-for package in ['av','cryptography','Pillow','zstandard','pyinstaller']:
+for package in ['av','cryptography','Pillow','zstandard','pyinstaller','jieba']:
     distribution=metadata.distribution(package)
     for item in distribution.files or []:
         if '.dist-info/' in item.as_posix() and any(x in item.name.lower() for x in ('license','copying','notice')):

@@ -11,6 +11,7 @@ from PIL import Image
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from database import Session
 from exporter import export_chats, parse_message
+from fun_stats import chat_statistics, moments_statistics
 from media import decode_dat, V2, wxgf_preview, valid_image, key_signature
 from moments import export_moments, load_moments
 from snapshot import snapshot, committed_wal, wal_checksum
@@ -30,8 +31,20 @@ def moment_database(path, rows):
     con.close()
 
 
+def moment_with_comments(timestamp, body, comments):
+    return moment_xml(timestamp, body).replace(
+        '</SnsDataItem>', f'<comment_user_list>{comments}</comment_user_list></SnsDataItem>')
+
+
+def comment_xml(id32, username, content, stamp, extra=''):
+    return (f'<user_comment><comment_id>{id32}</comment_id><username>{username}</username>'
+            f'<create_time>{stamp}</create_time><content><![CDATA[{content}]]></content>'
+            f'{extra}</user_comment>')
+
+
 def check_desktop(window):
     import time
+    from unittest.mock import patch
     chat, moments = window.pages['chat'], window.pages['moments']
     window.geometry('660x370')
     window.update()
@@ -71,7 +84,8 @@ def check_desktop(window):
     with tempfile.TemporaryDirectory() as directory:
         session = Session(scratch=directory)
         try:
-            moment_database(session.cache/'sns.db', [(1, moment_xml(1700000000, '按钮验收')),
+            moment_database(session.cache/'sns.db', [(1, moment_with_comments(
+                1700000000, '按钮验收', comment_xml(1, 'alice', '评论验收', 1700000001))),
                                                      (2, moment_xml(1700000001, '另一个动态'))])
             session.moment_count = 2
             session.moment_status = '本机朋友圈 2 条（筛选日期前）'
@@ -85,6 +99,8 @@ def check_desktop(window):
             moments.root_dir.set('')
             moments.output_dir.set(directory)
             moments.pictures.set(False)
+            assert not moments.include_comments.get()
+            moments.include_comments.set(True)
             moments.export_button.invoke()
             deadline = time.monotonic() + 5
             while window.busy and time.monotonic() < deadline:
@@ -92,6 +108,7 @@ def check_desktop(window):
                 time.sleep(0.02)
             assert not window.busy
             assert '1 条朋友圈' in moments.status.get()
+            assert '评论 1 条' in moments.status.get()
             assert (moments.last_output/'朋友圈.html').is_file()
             window.state('zoomed')
             window.update()
@@ -104,8 +121,164 @@ def check_desktop(window):
             session.close()
             moments.session = None
 
+    class StatsTestSession(Session):
+        def connect(self, root=None, *, scope='all'):
+            assert scope == 'moments'
+            moment_database(self.cache/'sns.db', [(1, moment_xml(1700000000, '统计测试'))])
+            self.moment_count = 1
+
+    window.state('normal')
+    window.geometry('660x370')
+    window.nav['stats'].invoke()
+    window.update()
+    stats = window.pages['stats']
+    assert stats.run_button.winfo_ismapped() and stats.cancel_button.winfo_ismapped()
+    assert stats.run_button.winfo_rooty() + stats.run_button.winfo_height() <= window.winfo_rooty() + window.winfo_height()
+    stats.scope.set('只统计朋友圈')
+    stats.refresh_buttons()
+    assert stats.words_toggle.instate(['disabled'])
+    with patch('desktop_ui.Session', StatsTestSession):
+        stats.run_button.invoke()
+        deadline = time.monotonic() + 5
+        while window.busy and time.monotonic() < deadline:
+            window.update()
+            time.sleep(0.02)
+    assert not window.busy
+    assert stats.report['moments']['rank'] == [('alice', 1)]
+    assert stats.body.canvas.yview()[0] > 0
+
 
 class ExportTests(unittest.TestCase):
+    def test_comment_export_opt_in_replies_and_notifications(self):
+        from contextlib import closing
+        with tempfile.TemporaryDirectory() as directory, closing(Session(scratch=directory)) as session:
+            session.contacts = {'alice': {'name': '甲'}, 'bob': {'name': '乙'}}
+            stamp = 1700000000
+            comment_list = ''.join((
+                comment_xml(10, 'alice', '一楼 <script>', stamp + 20),
+                comment_xml(11, 'bob', '回复一楼', stamp + 30,
+                            '<ref_comment_id>10</ref_comment_id><ref_username>alice</ref_username>'),
+                comment_xml(12, 'alice', '', stamp + 40,
+                            '<ref_comment_id>98</ref_comment_id><ref_username>bob</ref_username>'
+                            '<comment_imageinfo_count>1</comment_imageinfo_count>'),
+                comment_xml(14, 'bob', '已删除内容', stamp + 50, '<b_deleted>1</b_deleted>'),
+                comment_xml(0, 'bob', '64 位 ID', stamp + 60,
+                            '<comment_64id>18446744073709551610</comment_64id>'
+                            '<ref_comment_id>11</ref_comment_id><ref_username>bob</ref_username>'),
+            ))
+            db = session.cache/'sns.db'
+            moment_database(db, [
+                (1, moment_with_comments(stamp, '要导出的动态', comment_list)),
+                (2, moment_with_comments(stamp + 1, '另一条', comment_xml(10, 'bob', '不可混入', stamp))),
+            ])
+            with closing(sqlite3.connect(db)) as con, con:
+                con.execute('CREATE TABLE SnsMessage_tmp3 (feed_id,type,from_username,from_nickname,'
+                            'content,create_time,local_id,comment_id,del_status,serialized_ref_buf)')
+                con.executemany('INSERT INTO SnsMessage_tmp3 VALUES (?,?,?,?,?,?,?,?,?,?)', [
+                    (1, 2, 'bob', '冗余', '不得优先于时间线', stamp + 30, 8, 11, 0, b''),
+                    (1, 2, 'bob', '', '通知补录', stamp + 70, 9, 13, 0, b'\x0a\x05alice'),
+                    (1, 1, 'bob', '', '点赞', stamp + 70, 10, 15, 0, b''),
+                    (1, 2, 'bob', '', '已删通知', stamp + 70, 11, 14, 1, b''),
+                ])
+            root = Path(directory)
+            off, summary = export_moments(session, root, start=stamp, end=stamp + 1, include_images=False)
+            off_post = json.loads((off/'朋友圈.json').read_text('utf8'))[0]
+            self.assertNotIn('comments', off_post)
+            self.assertEqual(summary['comments'], 0)
+            self.assertNotIn('回复一楼', (off/'朋友圈.html').read_text('utf8'))
+            out, summary = export_moments(session, root, start=stamp, end=stamp + 1,
+                                          include_images=False, include_comments=True)
+            records = json.loads((out/'朋友圈.json').read_text('utf8'))
+            comments = records[0]['comments']
+            self.assertEqual(summary['comments'], 5)
+            self.assertEqual([row['id'] for row in comments], ['10', '11', '12', '18446744073709551610', '13'])
+            self.assertEqual(comments[1]['reply_to']['parent_id'], '10')
+            self.assertEqual(comments[1]['reply_to']['author'], '甲')
+            self.assertIsNone(comments[2]['reply_to']['parent_id'])
+            self.assertEqual(comments[2]['reply_to']['comment_id'], '98')
+            self.assertEqual(comments[2]['image_count'], 1)
+            self.assertEqual(comments[3]['reply_to']['parent_id'], '11')
+            self.assertEqual(comments[4]['source'], 'notification')
+            self.assertEqual(comments[4]['reply_to']['username'], 'alice')
+            self.assertIsNone(comments[4]['reply_to']['parent_id'])
+            self.assertEqual(dt.datetime.fromisoformat(comments[4]['time']).timestamp(), stamp + 70)
+            html_view = (out/'朋友圈.html').read_text('utf8')
+            self.assertIn('href="#m0-c0"', html_view)
+            self.assertIn('&lt;script&gt;', html_view)
+            self.assertIn('原评论缺失', html_view)
+            self.assertNotIn('已删除内容', html_view)
+            self.assertNotIn('不可混入', html_view)
+            self.assertIn('回复 甲（评论 10）', (out/'朋友圈.txt').read_text('utf8'))
+
+    def test_chat_statistics_ranges_ownership_and_rankings(self):
+        from contextlib import closing
+        from zstandard import ZstdCompressor
+        t1 = int(dt.datetime(2024, 12, 31, 23, 45).timestamp())
+        t2 = int(dt.datetime(2025, 1, 1, 0, 15).timestamp())
+        edge = t2 + 3600
+        packed = ZstdCompressor().compress('望远镜 hello [呲牙]'.encode())
+        source = {
+            'bob': [(1, 1, t1, 'hello hello [呲牙]', None), (1, 2, t1, 'hello 蓝蓝[呲牙]', None),
+                    ((1 << 32) | 1, 1, t2, None, packed), (10002, 1, t2, '跳过系统消息', None),
+                    (1, 2, edge, '边界之外', None)],
+            'carol': [(3, 3, t2, None, None), (34, 1, t2, None, None)],
+            'group@chatroom': [(1, 1, t2, 'alice:\nhello 投入[裂开]', None)],
+            'gh_feed': [(1, 4, t2, '服务', None)],
+        }
+        with tempfile.TemporaryDirectory() as directory, closing(Session(scratch=directory)) as session:
+            session.account = Path(directory)/'alice_abcd'
+            contacts = session.cache/'contact.db'
+            with closing(sqlite3.connect(contacts)) as con, con:
+                con.execute('CREATE TABLE contact(username,nick_name,remark,verify_flag)')
+                con.executemany('INSERT INTO contact VALUES (?,?,?,?)',
+                                [('alice','Alice','',0), ('bob','Bob','',0), ('carol','Carol','',0),
+                                 ('group@chatroom','群','',0), ('gh_feed','官方','',56)])
+            db = session.cache/'message_0.db'
+            with closing(sqlite3.connect(db)) as con, con:
+                con.execute('CREATE TABLE Name2Id(user_name)')
+                con.executemany('INSERT INTO Name2Id VALUES (?)', [(x,) for x in ('alice','bob','carol','gh_feed')])
+                for user, rows in source.items():
+                    table = 'Msg_' + hashlib.md5(user.encode()).hexdigest()
+                    con.execute(f'CREATE TABLE {table}(local_type INTEGER,real_sender_id INTEGER,create_time INTEGER,'
+                                'message_content,compress_content)')
+                    con.executemany(f'INSERT INTO {table} VALUES (?,?,?,?,?)', rows)
+            session.shards.append(db)
+            session.index()
+            result = chat_statistics(session, start=t1, end=edge)
+            self.assertEqual(result['messages'], 7)
+            self.assertEqual(result['owner'], 'alice')
+            self.assertEqual(result['own_text_messages'], 3)
+            self.assertEqual(result['private_rank'], [('Bob', 3), ('Carol', 2)])
+            self.assertEqual([(item['year'],item['leaders']) for item in result['annual']],
+                             [(2025, ['Carol']), (2024, ['Bob'])])
+            self.assertEqual(dict(result['chars'])['蓝'], 2)
+            self.assertEqual(dict(result['words'])['hello'], 5)
+            self.assertEqual(dict(result['own_words'])['hello'], 4)
+            self.assertNotIn('alice', dict(result['words']))
+            self.assertEqual(dict(result['own_emojis']), {'[呲牙]': 2, '[裂开]': 1})
+            session.account = Path(directory)/'unidentified'
+            totals_only = chat_statistics(session, start=t1, end=edge, include_words=False)
+            self.assertEqual(totals_only['private_rank'], result['private_rank'])
+            self.assertEqual(totals_only['owner'], '')
+            self.assertEqual(totals_only['own_emojis'], [])
+
+    def test_moments_statistics_author_counts(self):
+        from contextlib import closing
+        with tempfile.TemporaryDirectory() as directory, closing(Session(scratch=directory)) as session:
+            session.contacts = {'alice': {'name': '甲'}, 'bob': {'name': '乙'}}
+            moment_database(session.cache/'sns.db', [
+                (1, moment_xml(1700000000)),
+                (2, moment_xml(1700000001)),
+                (3, moment_xml(1700000002).replace('alice', 'bob')),
+                (4, moment_xml(1700000003).replace('alice', 'bob')),
+                (5, moment_xml(0)),
+            ])
+            session.moment_count = 5
+            result = moments_statistics(session, start=1700000000, end=1700000003)
+            self.assertEqual(result['rank'], [('甲', 2), ('乙', 1)])
+            self.assertEqual(result['count'], 3)
+            self.assertEqual(result['unknown_time'], 1)
+
     def test_workspace_database_scopes(self):
         from contextlib import closing
         from unittest.mock import patch

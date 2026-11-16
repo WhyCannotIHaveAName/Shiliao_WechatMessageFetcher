@@ -1,5 +1,7 @@
 # 拾聊 2.6.1 Windows 版
 
+Android 验收版见 [Android 使用与构建说明](android/README.md)，可在手机导入电脑档案、收藏、搜索和再导出。
+
 从 [GitHub Releases 下载 Windows 2.6.1](https://github.com/WhyCannotIHaveAName/Shiliao_WechatMessageFetcher/releases/download/v2.6.1/Shiliao-2.6.1-Windows.zip)，解压整个压缩包，然后打开 `Shiliao-2.6.1\Shiliao-2.6.1.exe`。
 
 聊天记录和朋友圈各有独立工作区，可按需读取、筛选和导出为 HTML、TXT、JSON。朋友圈支持按正文、发布者和分享链接搜索。导出按钮固定在底栏。

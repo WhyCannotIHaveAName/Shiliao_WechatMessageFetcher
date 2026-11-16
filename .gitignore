@@ -4,6 +4,10 @@
 /build/
 /dist*/
 /outputs/
+/android/build/
+*.apk
+*.jks
+*.p12
 __pycache__/
 packaged-test.json
 *.db*

@@ -18,6 +18,7 @@ from zstandard import ZstdError
 from database import decode_content, text
 from exporter import STYLE
 from media import ImageDecoder, kind, valid_image
+from moment_comments import COMMENT_STYLE, load_comments, write_comments
 from snapshot import readonly
 
 
@@ -245,7 +246,7 @@ def clickable(url):
         return False
 
 
-def write_post(post, markup, plain):
+def write_post(post, markup, plain, index):
     esc = html.escape
     time = post['time'] or '发布时间未知'
     author = post['author']
@@ -281,12 +282,13 @@ def write_post(post, markup, plain):
     if post.get('warning'):
         markup.write(f"<p><small>{esc(post['warning'])}</small></p>")
         plain.write(post['warning'] + '\n')
+    write_comments(post.get('comments'), markup, plain, index)
     markup.write('</article>\n')
     plain.write('\n')
 
 
 def export_moments(session, directory, start=None, end=None, include_images=True, include_cache=False,
-                   *, timeline=None, keyword=''):
+                   *, timeline=None, keyword='', include_comments=False):
     target = Path(directory) / ('拾聊朋友圈-' + dt.datetime.now().strftime('%Y%m%d-%H%M%S')
                                 + '-' + uuid.uuid4().hex[:6])
     staging = target.with_name(target.name + '.未完成')
@@ -296,12 +298,17 @@ def export_moments(session, directory, start=None, end=None, include_images=True
                'candidate_images': 0, 'unavailable_images': 0, 'parse_warnings': 0,
                'without_time_excluded': 0, 'include_images': include_images,
                'include_cache': include_cache, 'cached_images': 0,
+               'include_comments': include_comments, 'comments': 0, 'comment_parse_warnings': 0,
                'start': start, 'end_exclusive': end, 'keyword': keyword}
     try:
         session.progress('正在整理本地朋友圈…')
         if timeline is None:
             timeline = load_moments(session)
         posts, summary['without_time_excluded'] = filter_dates(session, timeline.search(keyword), start, end)
+        threads = {}
+        if include_comments:
+            session.progress('正在读取已选朋友圈的本地评论…')
+            threads, summary['comment_parse_warnings'] = load_comments(session, posts)
         assets = staging / 'assets'
         assets.mkdir()
         images = None
@@ -314,7 +321,7 @@ def export_moments(session, directory, start=None, end=None, include_images=True
         with ((staging / '朋友圈.html').open('w', encoding='utf8') as markup,
               (staging / '朋友圈.txt').open('w', encoding='utf8') as plain,
               (staging / '朋友圈.json').open('w', encoding='utf8') as records):
-            markup.write(PAGE + '<title>朋友圈 · 拾聊</title><style>' + STYLE + '</style>'
+            markup.write(PAGE + '<title>朋友圈 · 拾聊</title><style>' + STYLE + COMMENT_STYLE + '</style>'
                          '<main><h1>朋友圈</h1>')
             if include_cache:
                 markup.write('<p><a href="本机图片缓存.html">浏览本机图片缓存'
@@ -326,6 +333,8 @@ def export_moments(session, directory, start=None, end=None, include_images=True
                     if index and index % 200 == 0:
                         session.progress(f'正在导出朋友圈 · {index:,}/{len(posts):,} 条')
                     post = dict(source, images=[dict(image) for image in source['images']])
+                    if include_comments:
+                        post['comments'] = threads.get(source['id'], [])
                     for image in post['images']:
                         if not include_images:
                             image.update(status='未启用图片导出', code='disabled')
@@ -334,12 +343,13 @@ def export_moments(session, directory, start=None, end=None, include_images=True
                         key = {'verified': 'verified_images', 'candidate': 'candidate_images',
                                'missing': 'unavailable_images'}[image['code']]
                         summary[key] += 1
-                    write_post(post, markup, plain)
+                    write_post(post, markup, plain, index)
                     if index:
                         records.write(',\n')
                     json.dump(post, records, ensure_ascii=False)
                     summary['moments'] += 1
                     summary['links'] += len(post['links'])
+                    summary['comments'] += len(post.get('comments', ()))
                     summary['parse_warnings'] += 'warning' in post
                 if not posts:
                     markup.write('<p>所选范围内没有本地朋友圈记录。</p>')

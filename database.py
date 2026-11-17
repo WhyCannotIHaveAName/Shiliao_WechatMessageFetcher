@@ -154,9 +154,13 @@ class Session:
         contact = self.cache / "contact.db"
         if contact.exists():
             with closing(readonly(contact)) as con:
-                for r in con.execute("SELECT username,nick_name,remark FROM contact"):
-                    user, nick, remark = map(text, r)
-                    names[user] = {"name": remark or nick or user, "nickname": nick or user}
+                columns = {row[1] for row in con.execute('PRAGMA table_info(contact)')}
+                verification = 'verify_flag' if 'verify_flag' in columns else '0'
+                for user, nick, remark, verify_flag in con.execute(
+                        f"SELECT username,nick_name,remark,{verification} FROM contact"):
+                    user, nick, remark = map(text, (user, nick, remark))
+                    names[user] = {"name": remark or nick or user, "nickname": nick or user,
+                                   "verify_flag": verify_flag or 0}
         return names
 
     def index(self):

@@ -7,9 +7,9 @@
 
 Android 版通过导入电脑拾聊导出的 ZIP 或 JSON、手动收藏和系统分享获取内容。要导入照片，请把含 JSON 和 `assets` 的整个导出目录压成 ZIP，再传到手机。详见 [Android 使用与构建说明](android/README.md)。
 
-## Windows 版
+## Windows 2.7 验收版
 
-解压整个 Windows ZIP，然后打开 `Shiliao-2.6.1\Shiliao-2.6.1.exe`。
+解压整个验收 ZIP，然后打开 `Shiliao-2.7\Shiliao-2.7.exe`。上方 Windows 下载链接指向已发布的 2.6.1。
 
 聊天记录和朋友圈各有独立工作区，可按需读取、筛选和导出为 HTML、TXT、JSON。朋友圈支持按正文、发布者和分享链接搜索。导出按钮固定在底栏。
 
@@ -20,7 +20,7 @@ Android 版通过导入电脑拾聊导出的 ZIP 或 JSON、手动收藏和系�
 ## 使用
 
 1. 解压整个压缩包，保留可执行文件旁的 `_internal` 文件夹。
-2. 保持电脑微信已登录，双击 `Shiliao-2.6.1.exe`，在侧栏选择「聊天记录」。
+2. 保持电脑微信已登录，双击 `Shiliao-2.7.exe`，在侧栏选择「聊天记录」。
 3. 点击「读取聊天记录」。自动查找失败时，选择微信设置中显示的 `xwechat_files` 数据目录或其中的账号文件夹。多个账号时可选择具体账号目录。
 4. 点击列表中的会话勾选，可搜索、全选当前结果。可手填时间范围，也可点击“今天”“昨天”“一周前至今”“全部时间”。日期格式 `YYYY-MM-DD`；小时格式 `YYYY-MM-DD-H`，例如 `2026-11-09-1` 表示当天 1:00。小时为 0–23，留空不限。开始时间包含在内，结束整点不包含；仅填结束日期时包含全天。
 5. 选择保存位置，点击“导出所选会话”。完成后点击“打开导出文件夹”，打开其中的 `打开聊天记录.html`。
@@ -42,6 +42,16 @@ Android 版通过导入电脑拾聊导出的 ZIP 或 JSON、手动收藏和系�
 打开「导出本地图片」时，拾聊优先用图片内容的 MD5 校验。原图哈希不匹配时，仅在宽、高和字节数相等且匹配唯一的情况下保存候选图。候选图在 HTML 中折叠显示，需对照微信核对。未匹配的图片会在动态下标明。缺少原图很常见，微信本地可能只保留缩略图或重新编码后的版本。
 
 勾选「附带全部图片缓存（所有日期）」可输出 `本机图片缓存.html` 和所有可解码的本机朋友圈图片缓存。此选项独立于动态的关键词和日期范围，图片来自本地缓存，按内容去重。缓存文件没有可靠的动态编号或发布时间。朋友圈内容与图片的读取均在本机完成。HTML 只在你主动点击分享链接时打开外部页面。
+
+勾选「导出本地评论及回复」后，HTML 可展开评论，TXT 列出评论时间和回复对象，JSON 保留评论 ID、时间戳和已确认的原评论 ID。日期条件筛选动态，所选动态下本机可读的评论一并导出。可匹配的回复可在 HTML 里跳转到原评论，缺少原评论时保留能读到的引用信息。评论中的图片和表情保留附件数量。评论开关默认关闭。
+
+## 趣味统计
+
+在侧栏选择「趣味统计」，设定时间范围和数据来源，点击「生成统计」。可单独分析聊天或朋友圈。
+
+- **年度人物与私聊排行**依据本机双向私聊记录。年度人物按所选区间与每个自然年的交集计算，第一名并列时会标注。私聊排行展示前 12 位。
+- **聊天常用字词与表情**可切换大家或本人的榜单。中文词用 Jieba 离线分词，微信表情按文本里已知的方括号名称统计，例如 `[呲牙]`。本人统计使用与账号目录和联系人相符的发送者账号。取消「统计聊天字词和表情」可以直接生成数量排行。
+- **朋友圈发帖排行**比较同一时间范围内各发布者的本机动态数量，展示前 12 位。
 
 ## 图片与其他类型
 
@@ -70,7 +80,7 @@ python -m venv .venv
 $env:TCL_LIBRARY='vendor/tcl8.6'
 $env:TK_LIBRARY='vendor/tk8.6'
 .\.venv\Scripts\python -m PyInstaller --noconfirm Shiliao.spec
-$exe = Resolve-Path .\dist\Shiliao-2.6.1\Shiliao-2.6.1.exe
+$exe = Resolve-Path .\dist\Shiliao-2.7\Shiliao-2.7.exe
 $report = Join-Path (Get-Location) 'packaged-test.json'
 $p = Start-Process $exe -ArgumentList @('--self-test', ('"' + $report + '"')) -WindowStyle Hidden -PassThru -Wait
 if ($p.ExitCode -ne 0 -or !(Get-Content -Raw $report | ConvertFrom-Json).passed) { throw 'Self-test failed' }
@@ -87,3 +97,5 @@ https://github.com/fanyuantaier/wechatauto-replica/tree/bc2e6f2461330eb1a53996d2
 采用 Apache-2.0 许可，见 `LICENSE-Apache-2.0.txt`、`NOTICE.txt`。本项目隔离为只读导出，加入分页校验、WAL 已提交事务恢复、取消控制、界面、流式导出与测试。程序依赖的第三方许可随打包文件保存。
 
 朋友圈数据库表和本地缓存目录的格式参考 [wechatauto-replica 的朋友圈实现](https://github.com/fanyuantaier/wechatauto-replica/blob/bc2e6f2461330eb1a53996d2f2afc18416376b52/wechatauto/moment.py)。
+
+中文词频使用 [Jieba](https://github.com/fxsjy/jieba)，其许可证随 Windows 验收包附带。

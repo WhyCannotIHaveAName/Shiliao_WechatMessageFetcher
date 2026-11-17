@@ -7,6 +7,8 @@
 
 Android 版通过导入电脑拾聊导出的 ZIP 或 JSON、手动收藏和系统分享获取内容。要导入照片，请把含 JSON 和 `assets` 的整个导出目录压成 ZIP，再传到手机。详见 [Android 使用与构建说明](android/README.md)。
 
+Android 2.7 验收版可查看和选择是否再导出 Windows 2.7 档案中的朋友圈评论，也可离线生成年度人物、字词与表情、双向私聊和发帖排行。上表仍链接已发布的 2.6.1 APK。
+
 ## Windows 2.7 验收版
 
 解压整个验收 ZIP，然后打开 `Shiliao-2.7\Shiliao-2.7.exe`。上方 Windows 下载链接指向已发布的 2.6.1。

@@ -2,6 +2,7 @@ param(
     [Parameter(Mandatory)] [string] $Sdk,
     [Parameter(Mandatory)] [string] $Keystore,
     [string] $Alias = 'shiliao-preview',
+    [string] $Python = 'python',
     [string] $Output = (Join-Path $PSScriptRoot 'build/Shiliao-Android.apk'),
     [switch] $Instrumentation
 )
@@ -21,10 +22,15 @@ $scratch = Join-Path $PSScriptRoot ('build/' + [Guid]::NewGuid().ToString('N'))
 $classes = Join-Path $scratch 'classes'
 $dex = Join-Path $scratch 'dex'
 $resources = Join-Path $scratch 'resources.zip'
+$assets = Join-Path $scratch 'assets'
 $unsigned = Join-Path $scratch 'unsigned.apk'
 $aligned = Join-Path $scratch 'aligned.apk'
 $bytecode = Join-Path $scratch 'classes.jar'
-New-Item -ItemType Directory -Path $classes,$dex -Force | Out-Null
+New-Item -ItemType Directory -Path $classes,$dex,$assets -Force | Out-Null
+if (!$Instrumentation) {
+    Invoke-BuildTool $Python @((Join-Path $PSScriptRoot 'build_dictionary.py'),(Join-Path $assets 'words.bin'))
+    Copy-Item (Join-Path (Split-Path -Parent $PSScriptRoot) 'JIEBA-LICENSE.txt') $assets
+}
 
 $compile = @('--release','8','-encoding','UTF-8','-classpath',$platform,'-d',$classes)
 $compile += @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'src') -Filter '*.java' -Recurse | ForEach-Object FullName)
@@ -37,7 +43,9 @@ Invoke-BuildTool 'javac' $compile
 Invoke-BuildTool 'jar' @('--create','--file',$bytecode,'-C',$classes,'.')
 Invoke-BuildTool (Join-Path $tools 'd8.bat') @('--release','--min-api','26','--lib',$platform,'--output',$dex,$bytecode)
 Invoke-BuildTool (Join-Path $tools 'aapt2.exe') @('compile','--dir',(Join-Path $PSScriptRoot 'res'),'-o',$resources)
-Invoke-BuildTool (Join-Path $tools 'aapt2.exe') @('link','--manifest',$manifest,'-I',$platform,'-o',$unsigned,$resources)
+$link = @('link','--manifest',$manifest,'-I',$platform,'-o',$unsigned,$resources)
+if (!$Instrumentation) { $link += @('-A',$assets) }
+Invoke-BuildTool (Join-Path $tools 'aapt2.exe') $link
 Invoke-BuildTool 'jar' @('--update','--file',$unsigned,'-C',$dex,'classes.dex')
 Invoke-BuildTool (Join-Path $tools 'zipalign.exe') @('-f','4',$unsigned,$aligned)
 $out = [IO.Path]::GetFullPath($Output)

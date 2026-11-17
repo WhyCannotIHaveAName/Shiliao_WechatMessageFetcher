@@ -1,9 +1,11 @@
 # 拾聊
 
+> **要读取和导出微信聊天记录、朋友圈，请优先使用 Windows 电脑版。** 安卓版无法直接读取手机微信或其他应用的私有数据，包括微信的聊天记录和朋友圈数据库。请先用电脑版导出电脑微信已保存的记录，再把档案传到手机，用安卓版浏览、搜索或统计。
+
 | 平台 | 下载 | 用途 |
 | --- | --- | --- |
 | Windows 2.6.1 | [下载 ZIP](https://github.com/WhyCannotIHaveAName/Shiliao_WechatMessageFetcher/releases/download/v2.6.1/Shiliao-2.6.1-Windows.zip) | 读取电脑微信的本地聊天记录和朋友圈 |
-| Android 2.6.1 预览版 | [下载 APK](https://github.com/WhyCannotIHaveAName/Shiliao_WechatMessageFetcher/releases/download/v2.6.1-android-preview.1/Shiliao-Android-2.6.1-preview.1.apk) | 在手机上导入、搜索、收藏和再导出；Android 8.0 及以上 |
+| Android 2.6.1 预览版 | [下载 APK](https://github.com/WhyCannotIHaveAName/Shiliao_WechatMessageFetcher/releases/download/v2.6.1-android-preview.1/Shiliao-Android-2.6.1-preview.1.apk) | 在手机上查看和处理已导入的档案，不读取手机微信数据。支持 Android 8.0 及以上 |
 
 Android 版通过导入电脑拾聊导出的 ZIP 或 JSON、手动收藏和系统分享获取内容。要导入照片，请把含 JSON 和 `assets` 的整个导出目录压成 ZIP，再传到手机。详见 [Android 使用与构建说明](android/README.md)。
 

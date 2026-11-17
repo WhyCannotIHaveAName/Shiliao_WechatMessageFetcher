@@ -297,6 +297,8 @@ final class ArchiveStore extends SQLiteOpenHelper {
             case NUMBER:
                 String number = input.nextString();
                 try { return Long.valueOf(number); } catch (NumberFormatException ignored) { }
+                // Preserve integral identifiers that cannot round-trip through a double.
+                if (number.matches("-?[0-9]+")) return number;
                 try {
                     double decimal = Double.parseDouble(number);
                     return Double.isFinite(decimal) ? decimal : number;

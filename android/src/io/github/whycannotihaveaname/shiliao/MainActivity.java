@@ -29,6 +29,7 @@ import android.webkit.WebViewClient;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -50,12 +51,16 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity {
     private static final int OPEN = 11, SAVE = 12, PHOTO = 13;
+    private static final int STATS = 2;
     private static final String HOST = "archive.shiliao.invalid";
     private static final int PAPER = 0xfff8f5ef, CREAM = 0xfffffdf9, CLAY = 0xff974530,
             INK = 0xff29251f, MUTED = 0xff675d51, SELECTED = 0xfff0dfd4, LINE = 0xffe4dccf;
@@ -66,12 +71,18 @@ public final class MainActivity extends Activity {
     private int kind = ArchiveStore.MOMENTS;
     private Spinner archives;
     private List<ArchiveStore.Dataset> datasets = Collections.emptyList();
-    private Button chatTab, momentTab, importButton, collectButton, dateButton, galleryButton,
-            previous, next, exportButton;
+    private Button chatTab, momentTab, statsTab, importButton, collectButton, dateButton, galleryButton,
+            previous, next, exportButton, statsConfigButton, statsGenerateButton;
+    private LinearLayout recordsControls, recordsActions, statsActions;
     private EditText search;
     private WebView web;
     private TextView countView, status;
-    private boolean busy, loadingWorkspace, destroyed;
+    private boolean busy, loadingWorkspace;
+    private volatile boolean destroyed, statsCancelled;
+    private boolean statsRunning;
+    private FunStats.Options statsOptions = new FunStats.Options(true, true, true, "", "", "", null, null);
+    private List<String> statsOwners = Collections.emptyList(), statsOwnerLabels = Collections.emptyList();
+    private String statsMarkup, statsStatus = "";
     private int generation;
     private long documentVersion;
     private Runnable refresh;
@@ -89,7 +100,12 @@ public final class MainActivity extends Activity {
     private static final class PendingExport {
         final long id;
         final ArchiveStore.Filter filter;
-        PendingExport(long id, ArchiveStore.Filter filter) { this.id = id; this.filter = filter; }
+        final boolean comments;
+        PendingExport(long id, ArchiveStore.Filter filter, boolean comments) {
+            this.id = id;
+            this.filter = filter;
+            this.comments = comments;
+        }
     }
 
     private static final class Document {
@@ -113,6 +129,8 @@ public final class MainActivity extends Activity {
         super.onCreate(saved);
         store = new ArchiveStore(this);
         if (saved != null) restore(saved);
+        else statsOptions = new FunStats.Options(true, true, true, "", "",
+                getPreferences(MODE_PRIVATE).getString("statsOwner", ""), null, null);
         build();
         switchTo(kind);
         if (saved == null) acceptShare(getIntent());
@@ -121,6 +139,14 @@ public final class MainActivity extends Activity {
     @Override public void onSaveInstanceState(Bundle out) {
         super.onSaveInstanceState(out);
         out.putInt("kind", kind);
+        out.putBoolean("statsChat", statsOptions.chat);
+        out.putBoolean("statsMoments", statsOptions.moments);
+        out.putBoolean("statsWords", statsOptions.words);
+        out.putString("statsStart", statsOptions.start);
+        out.putString("statsEnd", statsOptions.end);
+        out.putString("statsOwner", statsOptions.owner);
+        writeIds(out, "statsChatIds", statsOptions.chatArchives);
+        writeIds(out, "statsMomentIds", statsOptions.momentArchives);
         for (int i = 0; i < workspaces.length; i++) {
             Workspace page = workspaces[i];
             out.putLong("id" + i, page.archive);
@@ -133,6 +159,7 @@ public final class MainActivity extends Activity {
         if (pendingExport != null) {
             out.putLong("destinationId", pendingExport.id);
             out.putString("destinationKeyword", pendingExport.filter.keyword);
+            out.putBoolean("destinationComments", pendingExport.comments);
             if (pendingExport.filter.start != null) out.putLong("destinationStart", pendingExport.filter.start);
             if (pendingExport.filter.end != null) out.putLong("destinationEnd", pendingExport.filter.end);
         }
@@ -146,6 +173,9 @@ public final class MainActivity extends Activity {
 
     private void restore(Bundle in) {
         kind = in.getInt("kind", ArchiveStore.MOMENTS);
+        statsOptions = new FunStats.Options(in.getBoolean("statsChat", true), in.getBoolean("statsMoments", true),
+                in.getBoolean("statsWords", true), in.getString("statsStart", ""), in.getString("statsEnd", ""),
+                in.getString("statsOwner", ""), readIds(in, "statsChatIds"), readIds(in, "statsMomentIds"));
         for (int i = 0; i < workspaces.length; i++) {
             Workspace page = workspaces[i];
             page.archive = in.getLong("id" + i, -1);
@@ -159,7 +189,8 @@ public final class MainActivity extends Activity {
             pendingExport = new PendingExport(in.getLong("destinationId"), new ArchiveStore.Filter(
                     in.getString("destinationKeyword", ""),
                     in.containsKey("destinationStart") ? in.getLong("destinationStart") : null,
-                    in.containsKey("destinationEnd") ? in.getLong("destinationEnd") : null));
+                    in.containsKey("destinationEnd") ? in.getLong("destinationEnd") : null),
+                    in.getBoolean("destinationComments"));
         }
         if (in.containsKey("draftAuthor")) {
             draft = new CollectionDraft();
@@ -169,6 +200,22 @@ public final class MainActivity extends Activity {
             ArrayList<Uri> photos = in.getParcelableArrayList("draftPhotos");
             if (photos != null) draft.photos.addAll(photos);
         }
+    }
+
+    private static Set<Long> readIds(Bundle in, String key) {
+        long[] ids = in.getLongArray(key);
+        if (ids == null) return null;
+        Set<Long> selected = new HashSet<>();
+        for (long id : ids) selected.add(id);
+        return selected;
+    }
+
+    private static void writeIds(Bundle out, String key, Set<Long> selected) {
+        if (selected == null) return;
+        long[] ids = new long[selected.size()];
+        int i = 0;
+        for (long id : selected) ids[i++] = id;
+        out.putLongArray(key, ids);
     }
 
     private void build() {
@@ -197,9 +244,12 @@ public final class MainActivity extends Activity {
         LinearLayout tabs = row();
         chatTab = button("聊天记录", false, view -> switchTo(ArchiveStore.CHAT));
         momentTab = button("朋友圈", false, view -> switchTo(ArchiveStore.MOMENTS));
+        statsTab = button("趣味统计", false, view -> switchTo(STATS));
         tabs.addView(chatTab, weighted(dp(3)));
-        tabs.addView(momentTab, weighted(0));
+        tabs.addView(momentTab, weighted(dp(3)));
+        tabs.addView(statsTab, weighted(0));
         controls.addView(tabs, full());
+        recordsControls = column(PAPER);
 
         LinearLayout catalog = row();
         archives = new Spinner(this);
@@ -210,7 +260,7 @@ public final class MainActivity extends Activity {
         catalog.addView(archives, picker);
         collectButton = button("＋ 收藏", false, view -> showCollection(new CollectionDraft()));
         catalog.addView(collectButton);
-        controls.addView(catalog, full());
+        recordsControls.addView(catalog, full());
 
         LinearLayout filterBar = row();
         search = new EditText(this);
@@ -233,7 +283,8 @@ public final class MainActivity extends Activity {
         });
         filterBar.addView(dateButton);
         filterBar.addView(galleryButton);
-        controls.addView(filterBar, full());
+        recordsControls.addView(filterBar, full());
+        controls.addView(recordsControls, full());
         root.addView(controls, full());
 
         web = new WebView(this);
@@ -266,6 +317,9 @@ public final class MainActivity extends Activity {
 
             @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri uri = request.getUrl();
+                Document document = mounted;
+                if (document != null && request.isForMainFrame() && uri.getFragment() != null
+                        && document.page.equals(uri.buildUpon().fragment(null).build())) return false;
                 if (request.isForMainFrame() && request.hasGesture() && !HOST.equals(uri.getHost())
                         && RecordView.http(uri.toString())) {
                     try { startActivity(new Intent(Intent.ACTION_VIEW, uri)); }
@@ -281,17 +335,23 @@ public final class MainActivity extends Activity {
         status = label("", 12, MUTED);
         status.setMaxLines(2);
         bottom.addView(status, full());
-        LinearLayout actions = row();
+        recordsActions = row();
         previous = button("上一页", false, view -> changePage(-1));
         next = button("下一页", false, view -> changePage(1));
         countView = label("", 12, MUTED);
         countView.setGravity(Gravity.CENTER);
         exportButton = button("导出 ZIP", true, view -> exportPicker());
-        actions.addView(previous);
-        actions.addView(countView, weighted(0));
-        actions.addView(next);
-        actions.addView(exportButton);
-        bottom.addView(actions, full());
+        recordsActions.addView(previous);
+        recordsActions.addView(countView, weighted(0));
+        recordsActions.addView(next);
+        recordsActions.addView(exportButton);
+        bottom.addView(recordsActions, full());
+        statsActions = row();
+        statsConfigButton = button("范围与来源", false, view -> showStatsOptions());
+        statsGenerateButton = button("生成统计", true, view -> generateStats());
+        statsActions.addView(statsConfigButton, weighted(dp(6)));
+        statsActions.addView(statsGenerateButton, weighted(0));
+        bottom.addView(statsActions, full());
         root.addView(bottom, full());
         setContentView(root);
         if (Build.VERSION.SDK_INT >= 30) {
@@ -306,7 +366,7 @@ public final class MainActivity extends Activity {
         archives.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onNothingSelected(AdapterView<?> parent) { }
             @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                if (loadingWorkspace || position >= datasets.size()) return;
+                if (kind == STATS || loadingWorkspace || position >= datasets.size()) return;
                 Workspace page = workspaces[kind];
                 if (page.archive == datasets.get(position).id) return;
                 page.archive = datasets.get(position).id;
@@ -319,7 +379,7 @@ public final class MainActivity extends Activity {
         search.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
-                if (loadingWorkspace) return;
+                if (kind == STATS || loadingWorkspace) return;
                 Workspace page = workspaces[kind];
                 page.keyword = s.toString();
                 page.offset = 0;
@@ -332,6 +392,19 @@ public final class MainActivity extends Activity {
     private void switchTo(int target) {
         loadingWorkspace = true;
         kind = target;
+        paintButton(chatTab, false, target == ArchiveStore.CHAT);
+        paintButton(momentTab, false, target == ArchiveStore.MOMENTS);
+        paintButton(statsTab, false, target == STATS);
+        if (target == STATS) {
+            ++generation;
+            if (refresh != null) main.removeCallbacks(refresh);
+            loadingWorkspace = false;
+            refreshControls();
+            if (!busy || statsRunning) status.setText(statsStatus);
+            showPage(null, statsMarkup == null ? StatsView.intro() : statsMarkup);
+            return;
+        }
+        if (!busy && status.getText().toString().equals(statsStatus)) status.setText("");
         Workspace page = workspaces[target];
         datasets = store.datasets(target);
         int selection = 0;
@@ -358,20 +431,30 @@ public final class MainActivity extends Activity {
         archives.setSelection(selection);
         search.setText(page.keyword);
         search.setHint(target == ArchiveStore.CHAT ? "搜索发送者或消息" : "搜索正文、发布者或链接");
-        paintButton(chatTab, false, target == ArchiveStore.CHAT);
-        paintButton(momentTab, false, target == ArchiveStore.MOMENTS);
         loadingWorkspace = false;
         refreshControls();
         requestPage(0);
     }
 
     private ArchiveStore.Dataset selected() {
+        if (kind == STATS) return null;
         long id = workspaces[kind].archive;
         for (ArchiveStore.Dataset item : datasets) if (item.id == id) return item;
         return null;
     }
 
     private void refreshControls() {
+        boolean showStats = kind == STATS;
+        recordsControls.setVisibility(showStats ? View.GONE : View.VISIBLE);
+        recordsActions.setVisibility(showStats ? View.GONE : View.VISIBLE);
+        statsActions.setVisibility(showStats ? View.VISIBLE : View.GONE);
+        importButton.setEnabled(!busy);
+        if (showStats) {
+            statsConfigButton.setEnabled(!busy);
+            statsGenerateButton.setText(statsRunning ? "取消统计" : "生成统计");
+            statsGenerateButton.setEnabled(!busy || statsRunning && !statsCancelled);
+            return;
+        }
         Workspace page = workspaces[kind];
         ArchiveStore.Dataset item = selected();
         boolean gallery = item != null && item.gallery && page.gallery;
@@ -384,7 +467,6 @@ public final class MainActivity extends Activity {
         collectButton.setVisibility(kind == ArchiveStore.MOMENTS ? View.VISIBLE : View.GONE);
         collectButton.setEnabled(!busy);
         exportButton.setEnabled(item != null && !busy && !gallery);
-        importButton.setEnabled(!busy);
     }
 
     private void requestPage(long delay) {
@@ -463,7 +545,19 @@ public final class MainActivity extends Activity {
     private void exportPicker() {
         ArchiveStore.Dataset data = selected();
         if (data == null || busy) return;
-        pendingExport = new PendingExport(data.id, filters(workspaces[kind]));
+        ArchiveStore.Filter filter = filters(workspaces[kind]);
+        if (data.kind == ArchiveStore.MOMENTS) {
+            CheckBox comments = check("包含档案内的评论及回复", false);
+            LinearLayout fields = dialogFields();
+            fields.addView(comments, full());
+            fields.addView(label("导出当前筛选的动态。勾选后保留原档案中的评论时间和回复关系。", 13, MUTED), full());
+            new AlertDialog.Builder(this).setTitle("导出朋友圈").setView(fields).setNegativeButton("取消", null)
+                    .setPositiveButton("选择保存位置", (dialog, which) -> exportPicker(data, filter, comments.isChecked())).show();
+        } else exportPicker(data, filter, false);
+    }
+
+    private void exportPicker(ArchiveStore.Dataset data, ArchiveStore.Filter filter, boolean comments) {
+        pendingExport = new PendingExport(data.id, filter, comments);
         Intent intent = document(Intent.ACTION_CREATE_DOCUMENT, "application/zip");
         intent.putExtra(Intent.EXTRA_TITLE, data.kind == ArchiveStore.CHAT ? "拾聊聊天记录.zip" : "拾聊朋友圈.zip");
         startActivityForResult(intent, SAVE);
@@ -502,6 +596,7 @@ public final class MainActivity extends Activity {
                 ArchiveStore.ImportResult result = store.importFile(bytes, displayName(uri));
                 main.post(() -> {
                     if (destroyed) return;
+                    invalidateStats();
                     Workspace page = workspaces[result.kind];
                     page.archive = result.selection;
                     page.offset = 0;
@@ -528,7 +623,7 @@ public final class MainActivity extends Activity {
                 ArchiveStore.Dataset dataset = store.dataset(selection.id);
                 if (dataset == null) throw new IOException("原档案不可用");
                 staged = File.createTempFile("export-", ".zip", getCacheDir());
-                final int count = RecordView.export(store, dataset, selection.filter, staged);
+                final int count = RecordView.export(store, dataset, selection.filter, staged, selection.comments);
                 try (InputStream data = new FileInputStream(staged);
                      OutputStream target = getContentResolver().openOutputStream(destination, "wt")) {
                     if (target == null) throw new IOException("无法写入所选保存位置");
@@ -538,6 +633,176 @@ public final class MainActivity extends Activity {
             } catch (Exception e) { postFailure("导出失败", e); }
             finally { if (staged != null) staged.delete(); }
         });
+    }
+
+    private CheckBox check(String text, boolean checked) {
+        CheckBox box = new CheckBox(this);
+        box.setText(text);
+        box.setTextColor(INK);
+        box.setTextSize(14);
+        box.setButtonTintList(ColorStateList.valueOf(CLAY));
+        box.setMinHeight(dp(42));
+        box.setChecked(checked);
+        return box;
+    }
+
+    private final class ArchiveSelection {
+        final String type;
+        final List<ArchiveStore.Dataset> list;
+        final Button button;
+        Set<Long> ids;
+
+        ArchiveSelection(String type, int kind, Set<Long> current) {
+            this.type = type;
+            list = store.datasets(kind);
+            ids = current == null ? null : new HashSet<>(current);
+            button = button("", false, view -> pick());
+            update();
+        }
+
+        private void update() {
+            button.setText(type + "档案 · " + (ids == null ? "全部 " + list.size() + " 份" : "已选 " + ids.size() + " 份"));
+        }
+
+        private void pick() {
+            if (list.isEmpty()) {
+                new AlertDialog.Builder(MainActivity.this).setTitle(type + "档案").setMessage("请先导入电脑导出的档案。")
+                        .setPositiveButton("关闭", null).show();
+                return;
+            }
+            String[] labels = new String[list.size()];
+            boolean[] included = new boolean[list.size()];
+            for (int i = 0; i < list.size(); i++) {
+                ArchiveStore.Dataset item = list.get(i);
+                labels[i] = item.name + "  ·  " + item.size + " 条（档案 #" + item.id + "）";
+                included[i] = ids == null || ids.contains(item.id);
+            }
+            new AlertDialog.Builder(MainActivity.this).setTitle("选择" + type + "档案")
+                    .setMultiChoiceItems(labels, included, (dialog, which, checked) -> included[which] = checked)
+                    .setNegativeButton("取消", null)
+                    .setNeutralButton("选全部", (dialog, which) -> { ids = null; update(); })
+                    .setPositiveButton("应用", (dialog, which) -> {
+                        Set<Long> picked = new HashSet<>();
+                        for (int i = 0; i < list.size(); i++) if (included[i]) picked.add(list.get(i).id);
+                        ids = picked.size() == list.size() ? null : picked;
+                        update();
+                    }).show();
+        }
+    }
+
+    private void showStatsOptions() {
+        FunStats.Options saved = statsOptions;
+        LinearLayout fields = dialogFields();
+        CheckBox chat = check("分析聊天记录", saved.chat), moment = check("分析朋友圈", saved.moments);
+        CheckBox words = check("统计聊天字词与微信表情", saved.words);
+        ArchiveSelection chatScope = new ArchiveSelection("聊天", ArchiveStore.CHAT, saved.chatArchives);
+        ArchiveSelection momentScope = new ArchiveSelection("朋友圈", ArchiveStore.MOMENTS, saved.momentArchives);
+        fields.addView(chat, full());
+        fields.addView(chatScope.button, full());
+        fields.addView(words, full());
+        fields.addView(moment, full());
+        fields.addView(momentScope.button, full());
+        EditText start = field(fields, "开始日期 · YYYY-MM-DD 或 YYYY-MM-DD-H", saved.start, false);
+        EditText end = field(fields, "结束日期 · 留空不限", saved.end, false);
+        EditText owner = field(fields, "本人账号 · 可选，填写档案中的 sender_username", saved.owner, false);
+        owner.setHint("微信账号标识");
+        Button pickOwner = button("从已统计的发送者中选择", false, view ->
+                new AlertDialog.Builder(this).setTitle("确认哪个账号是你")
+                        .setItems(statsOwnerLabels.toArray(new String[0]), (dialog, which) -> owner.setText(statsOwners.get(which)))
+                        .setNegativeButton("取消", null).show());
+        pickOwner.setVisibility(statsOwners.isEmpty() ? View.GONE : View.VISIBLE);
+        fields.addView(pickOwner, full());
+        fields.addView(label("也可先生成一次统计，再从发送者列表选择。选错时可修改或留空。", 13, MUTED), full());
+        Runnable update = () -> {
+            chatScope.button.setEnabled(chat.isChecked());
+            momentScope.button.setEnabled(moment.isChecked());
+            words.setEnabled(chat.isChecked());
+            owner.setEnabled(chat.isChecked());
+            pickOwner.setEnabled(chat.isChecked());
+        };
+        chat.setOnCheckedChangeListener((view, checked) -> update.run());
+        moment.setOnCheckedChangeListener((view, checked) -> update.run());
+        update.run();
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(fields);
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("统计范围与来源").setView(scroll)
+                .setNegativeButton("取消", null).setPositiveButton("应用", null).create();
+        dialog.setOnShowListener(view -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(button -> {
+            if (!chat.isChecked() && !moment.isChecked()) {
+                chat.setError("请至少选择一种来源");
+                chat.requestFocus();
+                return;
+            }
+            String id = owner.getText().toString().trim();
+            if (id.length() > 256 || id.matches(".*\\s.*")) {
+                owner.setError("请输入一个完整的账号标识");
+                return;
+            }
+            FunStats.Options options = new FunStats.Options(chat.isChecked(), moment.isChecked(), words.isChecked(),
+                    start.getText().toString().trim(), end.getText().toString().trim(), id, chatScope.ids, momentScope.ids);
+            try { options.filter(); }
+            catch (RuntimeException e) { end.setError("请检查日期格式及开始、结束顺序"); end.requestFocus(); return; }
+            statsOptions = options;
+            getPreferences(MODE_PRIVATE).edit().putString("statsOwner", options.owner).apply();
+            dialog.dismiss();
+            generateStats();
+        }));
+        dialog.show();
+        dialog.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
+    }
+
+    private void generateStats() {
+        if (statsRunning) {
+            statsCancelled = true;
+            status.setText(statsStatus = "正在取消统计…");
+            refreshControls();
+            return;
+        }
+        if (busy) return;
+        statsRunning = true;
+        statsCancelled = false;
+        statsMarkup = null;
+        showPage(null, StatsView.intro());
+        begin(statsStatus = "正在统计本机档案…");
+        FunStats.Options options = statsOptions;
+        executor.execute(() -> {
+            try {
+                FunStats.Result result = FunStats.collect(this, store, options, () -> statsCancelled || destroyed,
+                        lines -> main.post(() -> {
+                            if (!destroyed && !statsCancelled) status.setText(statsStatus = "正在统计 · 已读取 " + lines + " 条");
+                        }));
+                String markup = StatsView.render(options, result);
+                List<String> ids = result.ownerChoices(), labels = new ArrayList<>();
+                for (String id : ids) labels.add(result.ownerName(id) + " · " + id);
+                main.post(() -> {
+                    if (destroyed) return;
+                    if (statsCancelled) {
+                        endStats("统计已取消。");
+                        return;
+                    }
+                    statsOwners = ids;
+                    statsOwnerLabels = labels;
+                    statsMarkup = markup;
+                    if (kind == STATS) showPage(null, markup);
+                    endStats("统计已生成 · " + (result.chats + result.moments) + " 条记录");
+                });
+            } catch (CancellationException e) {
+                main.post(() -> { if (!destroyed) endStats("统计已取消。"); });
+            } catch (Exception e) {
+                main.post(() -> { if (!destroyed) { endStats("统计失败"); showError("统计失败", e); } });
+            }
+        });
+    }
+
+    private void endStats(String message) {
+        statsRunning = false;
+        finish(statsStatus = message);
+    }
+
+    private void invalidateStats() {
+        if (statsMarkup != null) statsStatus = "档案已更新，请重新生成统计。";
+        statsMarkup = null;
+        statsOwners = statsOwnerLabels = Collections.emptyList();
     }
 
     private void showDates() {
@@ -674,6 +939,7 @@ public final class MainActivity extends Activity {
                 long id = store.collect(value.author, value.text, published, value.photos);
                 main.post(() -> {
                     if (destroyed) return;
+                    invalidateStats();
                     Workspace page = workspaces[ArchiveStore.MOMENTS];
                     page.archive = id;
                     page.gallery = false;
